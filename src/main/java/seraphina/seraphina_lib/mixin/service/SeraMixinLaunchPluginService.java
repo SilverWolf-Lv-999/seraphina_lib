@@ -205,6 +205,16 @@ public class SeraMixinLaunchPluginService implements ILaunchPluginService {
         }
     }
 
+    public static void registerMixin(String mixinClassName, ClassLoader mixinClassLoader) {
+        Objects.requireNonNull(mixinClassName, "mixinClassName");
+        SeraMixinLaunchPluginService service = currentService;
+        if (service != null) {
+            service.register(mixinClassName, mixinClassLoader);
+        } else {
+            PENDING_MIXINS.add(PendingMixin.ofMixinName(mixinClassName, mixinClassLoader));
+        }
+    }
+
     public static void registerMixin(String mixinClassName, String targetClassName, ClassLoader mixinClassLoader) {
         Objects.requireNonNull(mixinClassName, "mixinClassName");
         Objects.requireNonNull(targetClassName, "targetClassName");
@@ -218,6 +228,10 @@ public class SeraMixinLaunchPluginService implements ILaunchPluginService {
 
     public void register(Class<?> mixinClass) {
         this.register(mixinClass, null);
+    }
+
+    public void register(String mixinClassName, ClassLoader mixinClassLoader) {
+        this.registerMixinFromASM(mixinClassName, mixinClassLoader, null);
     }
 
     public void register(String mixinClassName, String targetClassName, ClassLoader mixinClassLoader) {
@@ -1424,6 +1438,10 @@ public class SeraMixinLaunchPluginService implements ILaunchPluginService {
             return new PendingMixin(mixinClass, null, null, mixinClass.getClassLoader());
         }
 
+        static PendingMixin ofMixinName(String mixinClassName, ClassLoader classLoader) {
+            return new PendingMixin(null, mixinClassName, null, classLoader);
+        }
+
         static PendingMixin ofNames(String mixinClassName, String targetClassName, ClassLoader classLoader) {
             return new PendingMixin(null, mixinClassName, targetClassName, classLoader);
         }
@@ -1431,6 +1449,8 @@ public class SeraMixinLaunchPluginService implements ILaunchPluginService {
         void apply(SeraMixinLaunchPluginService service) {
             if (this.mixinClass != null) {
                 service.register(this.mixinClass);
+            } else if (this.targetClassName == null) {
+                service.register(this.mixinClassName, this.classLoader);
             } else {
                 service.register(this.mixinClassName, this.targetClassName, this.classLoader);
             }
