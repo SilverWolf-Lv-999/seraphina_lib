@@ -62,7 +62,6 @@ public class SvgImage {
     private DynamicTexture texture;
     private ResourceLocation currentTextureLocation;
     private final Map<Long, ResourceLocation> animationFrameLocations = new HashMap<>();
-    private final Map<Long, DynamicTexture> animationFrameTextures = new HashMap<>();
     private Document document;
     private List<SvgAnimation> animations = List.of();
     private long animationStartMillis = -1L;
@@ -150,7 +149,7 @@ public class SvgImage {
     }
 
     public void draw(GuiGraphics graphics, float x, float y, float width, float height, float alpha, Color tint) {
-        drawInternal(graphics, x, y, width, height, alpha, tint, true, Float.NaN);
+        drawInternal(graphics, x, y, width, height, alpha, tint, Float.NaN);
     }
 
     public void drawAtTime(GuiGraphics graphics, float x, float y, float width, float height, float timeSeconds, float alpha) {
@@ -159,7 +158,7 @@ public class SvgImage {
 
     public void drawAtTime(GuiGraphics graphics, float x, float y, float width, float height,
                            float timeSeconds, float alpha, Color tint) {
-        drawInternal(graphics, x, y, width, height, alpha, tint, true, Math.max(0.0F, timeSeconds));
+        drawInternal(graphics, x, y, width, height, alpha, tint, Math.max(0.0F, timeSeconds));
     }
 
     public void drawStatic(GuiGraphics graphics, float x, float y, float width, float height, float alpha) {
@@ -167,22 +166,22 @@ public class SvgImage {
     }
 
     public void drawStatic(GuiGraphics graphics, float x, float y, float width, float height, float alpha, Color tint) {
-        drawInternal(graphics, x, y, width, height, alpha, tint, true, 0.0F);
+        drawInternal(graphics, x, y, width, height, alpha, tint, 0.0F);
     }
 
     private void drawInternal(GuiGraphics graphics, float x, float y, float width, float height, float alpha,
-                              Color tint, boolean updateAnimated, float explicitAnimationTimeSeconds) {
+                              Color tint, float explicitAnimationTimeSeconds) {
         float clampedAlpha = clamp01(alpha);
         if (clampedAlpha <= 0.0F) {
             return;
         }
 
         ensureLoaded();
-        if (!loaded || failed || clampedAlpha <= 0.0F) {
+        if (!loaded || failed) {
             return;
         }
 
-        if (animated && updateAnimated) {
+        if (animated) {
             if (Float.isFinite(explicitAnimationTimeSeconds)) {
                 updateAnimationFrame(explicitAnimationTimeSeconds);
             } else {
@@ -346,7 +345,7 @@ public class SvgImage {
             DynamicTexture dynamicTexture = new DynamicTexture(nativeImage);
             dynamicTexture.setFilter(true, false);
             dynamicTexture.upload();
-            animationFrameTextures.put(frameKey, dynamicTexture);
+//            animationFrameTextures.put(frameKey, dynamicTexture);
             Minecraft.getInstance().getTextureManager().register(frameLocation, dynamicTexture);
         };
 
@@ -372,10 +371,10 @@ public class SvgImage {
         DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
         factory.setNamespaceAware(false);
         setFeatureIfSupported(factory, XMLConstants.FEATURE_SECURE_PROCESSING, true);
-        setFeatureIfSupported(factory, "http://apache.org/xml/features/disallow-doctype-decl", true);
-        setFeatureIfSupported(factory, "http://xml.org/sax/features/external-general-entities", false);
-        setFeatureIfSupported(factory, "http://xml.org/sax/features/external-parameter-entities", false);
-        setFeatureIfSupported(factory, "http://apache.org/xml/features/nonvalidating/load-external-dtd", false);
+        setFeatureIfSupported(factory, "https://apache.org/xml/features/disallow-doctype-decl", true);
+        setFeatureIfSupported(factory, "https://xml.org/sax/features/external-general-entities", false);
+        setFeatureIfSupported(factory, "https://xml.org/sax/features/external-parameter-entities", false);
+        setFeatureIfSupported(factory, "https://apache.org/xml/features/nonvalidating/load-external-dtd", false);
         setAttributeIfSupported(factory, XMLConstants.ACCESS_EXTERNAL_DTD, "");
         setAttributeIfSupported(factory, XMLConstants.ACCESS_EXTERNAL_SCHEMA, "");
 
@@ -757,7 +756,7 @@ public class SvgImage {
     private static Map<String, String> resolveStyleMap(Element element, Map<String, Map<String, String>> classStyles) {
         Map<String, String> values = new HashMap<>();
         String classAttribute = element.getAttribute("class");
-        if (classAttribute != null && !classAttribute.isBlank()) {
+        if (!classAttribute.isBlank()) {
             for (String className : classAttribute.trim().split("\\s+")) {
                 Map<String, String> classStyle = classStyles.get(className);
                 if (classStyle != null) {
@@ -963,7 +962,7 @@ public class SvgImage {
             int[] components = new int[3];
             int count = 0;
             while (matcher.find() && count < components.length) {
-                components[count++] = clamp(Math.round(Float.parseFloat(matcher.group())), 0, 255);
+                components[count++] = clamp(Math.round(Float.parseFloat(matcher.group())));
             }
             return count == components.length ? new Color(components[0], components[1], components[2]) : fallback;
         }
@@ -1008,7 +1007,7 @@ public class SvgImage {
     }
 
     private static Color applyOpacity(Color color, float opacity) {
-        int alpha = clamp(Math.round(color.getAlpha() * Math.max(0.0F, Math.min(1.0F, opacity))), 0, 255);
+        int alpha = clamp(Math.round(color.getAlpha() * Math.max(0.0F, Math.min(1.0F, opacity))));
         return new Color(color.getRed(), color.getGreen(), color.getBlue(), alpha);
     }
 
@@ -1078,14 +1077,11 @@ public class SvgImage {
         if (value < 0.0F) {
             return 0.0F;
         }
-        if (value > 1.0F) {
-            return 1.0F;
-        }
-        return value;
+        return Math.min(value, 1.0F);
     }
 
-    private static int clamp(int value, int min, int max) {
-        return Math.max(min, Math.min(max, value));
+    private static int clamp(int value) {
+        return Math.max(0, Math.min(255, value));
     }
 
     private record SvgStyle(Color fill, Color stroke, float strokeWidth, int lineCap, int lineJoin, float opacity,
@@ -1120,7 +1116,7 @@ public class SvgImage {
                                 String transformType) {
         private static Optional<SvgAnimation> fromAnimate(Element target, Element animation) {
             String attributeName = animation.getAttribute("attributeName");
-            if (attributeName == null || attributeName.isBlank()) {
+            if (attributeName.isBlank()) {
                 return Optional.empty();
             }
 
@@ -1154,7 +1150,7 @@ public class SvgImage {
 
         private static Optional<SvgAnimation> fromAnimateTransform(Element target, Element animation) {
             String type = animation.getAttribute("type");
-            if (type == null || type.isBlank()) {
+            if (type.isBlank()) {
                 type = "translate";
             }
 
@@ -1274,7 +1270,7 @@ public class SvgImage {
             }
 
             String trimmed = value.trim().toLowerCase(Locale.ROOT);
-            float multiplier = 1.0F;
+            float multiplier = 0.0F;
             if (trimmed.endsWith("ms")) {
                 multiplier = 0.001F;
             } else if (trimmed.endsWith("min")) {

@@ -210,7 +210,7 @@ public class GIFImage {
             height = canvas.height();
 
             BufferedImage composed = new BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB);
-            BufferedImage previousComposed = null;
+            BufferedImage previousComposed;
             Graphics2D graphics = composed.createGraphics();
             try {
                 int frameCount = reader.getNumImages(true);
@@ -228,7 +228,7 @@ public class GIFImage {
                     graphics.drawImage(rawFrame, metadata.left(), metadata.top(), null);
                     frames.add(new GIFFrame(deepCopy(composed), metadata.delayMillis()));
 
-                    applyDisposal(graphics, composed, previousComposed, metadata, rawFrame.getWidth(), rawFrame.getHeight());
+                    applyDisposal(graphics, previousComposed, metadata, rawFrame.getWidth(), rawFrame.getHeight());
                 }
             } finally {
                 graphics.dispose();
@@ -247,7 +247,7 @@ public class GIFImage {
         }
     }
 
-    private void applyDisposal(Graphics2D graphics, BufferedImage composed, BufferedImage previousComposed,
+    private void applyDisposal(Graphics2D graphics, BufferedImage previousComposed,
                                GIFFrameMetadata metadata, int frameWidth, int frameHeight) {
         switch (metadata.disposalMethod()) {
             case "restoreToBackgroundColor" -> {
@@ -263,14 +263,13 @@ public class GIFImage {
                 }
             }
             default -> {
-                // none / doNotDispose: keep the composed canvas for the next patch frame.
+                throw new IllegalStateException("Unknown disposalMethod: " + metadata.disposalMethod());
             }
         }
     }
 
     private void uploadFrames() {
-        for (int i = 0; i < frames.size(); i++) {
-            int frameIndex = i;
+        for (int frameIndex = 0; frameIndex < frames.size(); frameIndex++) {
             ResourceLocation frameLocation = frameTextureLocation(frameIndex);
             NativeImage nativeImage = toNativeImage(frames.get(frameIndex).image());
             Runnable upload = () -> {
@@ -314,7 +313,7 @@ public class GIFImage {
         return new GIFCanvas(Math.max(1, first.getWidth()), Math.max(1, first.getHeight()));
     }
 
-    private static GIFFrameMetadata readFrameMetadata(IIOMetadata metadata) throws Exception {
+    private static GIFFrameMetadata readFrameMetadata(IIOMetadata metadata) {
         Node root = metadata.getAsTree(metadata.getNativeMetadataFormatName());
         Node descriptor = firstChild(root, "ImageDescriptor");
         Node control = firstChild(root, "GraphicControlExtension");
@@ -447,10 +446,7 @@ public class GIFImage {
         if (value < 0.0F) {
             return 0.0F;
         }
-        if (value > 1.0F) {
-            return 1.0F;
-        }
-        return value;
+        return Math.min(value, 1.0F);
     }
 
     private record GIFCanvas(int width, int height) {
