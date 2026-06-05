@@ -3,6 +3,7 @@ package seraphina.seraphina_lib;
 import net.minecraftforge.fml.common.Mod;
 import seraphina.seraphina_lib.logger.Logger;
 import seraphina.seraphina_lib.logger.LoggerFactory;
+import seraphina.seraphina_lib.util.ModuleUtil;
 
 @Mod(LIBSource.MOD_ID)
 public class LIBSource {
@@ -10,5 +11,10 @@ public class LIBSource {
     private static final Logger LOGGER = LoggerFactory.getLogger(LIBSource.class);
 
     public LIBSource() {
+    }
+
+    static {
+        ModuleUtil.INSTANCE.openAllRequiredModules(LIBSource.class);
+        ModuleUtil.INSTANCE.openCurrentModuleToAllRequiredModules(LIBSource.class);
     }
 }

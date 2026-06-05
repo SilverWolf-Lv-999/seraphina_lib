@@ -1,6 +1,5 @@
 package seraphina.seraphina_lib.util.clazz;
 
-import jdk.internal.misc.Unsafe;
 import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.ClassWriter;
 import org.objectweb.asm.commons.ClassRemapper;
@@ -35,17 +34,11 @@ public class ClassUtils {
 
 	public  MethodHandles.Lookup getLookup() {
 		try {
-			Constructor<Unsafe> c = Unsafe.class.getDeclaredConstructor();
-			c.setAccessible(true);
-			Object instance = c.newInstance();
-			Method getObjectVolatile = Unsafe.class.getDeclaredMethod("getObjectVolatile", Object.class, long.class);
-			Method staticFieldBase = Unsafe.class.getDeclaredMethod("staticFieldBase", Field.class);
-			Method staticFieldOffset = Unsafe.class.getDeclaredMethod("staticFieldOffset", Field.class);
 			Field implLookupField = MethodHandles.Lookup.class.getDeclaredField("IMPL_LOOKUP");
-			Object base = staticFieldBase.invoke(instance, implLookupField);
-			long offset = (long) staticFieldOffset.invoke(instance, implLookupField);
-			return (MethodHandles.Lookup) getObjectVolatile.invoke(instance, base, offset);
-		} catch (Exception e) {
+			Object base = UnsafeAccess.staticFieldBase(implLookupField);
+			long offset = UnsafeAccess.staticFieldOffset(implLookupField);
+			return (MethodHandles.Lookup) UnsafeAccess.getObjectVolatile(base, offset);
+		} catch (Throwable e) {
 			try {
 				Constructor<MethodHandles.Lookup> c = MethodHandles.Lookup.class.getDeclaredConstructor();
 				c.setAccessible(true);
@@ -235,9 +228,9 @@ public class ClassUtils {
 		try {
 			Class<?> vmClass = Class.forName("sun.tools.attach.HotSpotVirtualMachine");
 			Field allowAttachSelfField = vmClass.getDeclaredField("ALLOW_ATTACH_SELF");
-			Object base = Unsafe.getUnsafe().staticFieldBase(allowAttachSelfField);
-			long offset = Unsafe.getUnsafe().staticFieldOffset(allowAttachSelfField);
-			Unsafe.getUnsafe().putBoolean(base, offset, false);
+			Object base = UnsafeAccess.staticFieldBase(allowAttachSelfField);
+			long offset = UnsafeAccess.staticFieldOffset(allowAttachSelfField);
+			UnsafeAccess.putBoolean(base, offset, false);
 		} catch (Throwable e) {
 			LOGGER.warn("Failed to allow attach self using reflection");
 		}

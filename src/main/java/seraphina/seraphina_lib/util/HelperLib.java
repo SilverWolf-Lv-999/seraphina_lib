@@ -3,18 +3,18 @@ package seraphina.seraphina_lib.util;
 import cpw.mods.modlauncher.Launcher;
 import cpw.mods.modlauncher.ModuleLayerHandler;
 import cpw.mods.modlauncher.api.NamedPath;
-import jdk.internal.misc.Unsafe;
 import net.minecraftforge.fml.loading.ModDirTransformerDiscoverer;
 import org.apache.commons.compress.utils.IOUtils;
 import seraphina.seraphina_lib.logger.Logger;
 import seraphina.seraphina_lib.logger.LoggerFactory;
 import seraphina.seraphina_lib.util.clazz.ClassUtils;
+import seraphina.seraphina_lib.util.clazz.UnsafeAccess;
 
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
-import java.lang.invoke.MethodType;
+import java.lang.invoke.MethodHandle;
 import java.lang.module.ResolvedModule;
 import java.lang.reflect.AccessibleObject;
 import java.lang.reflect.Field;
@@ -67,17 +67,11 @@ public final class HelperLib {
         }
     }
 
-    private static Object getInternalUNSAFE() {
-        try {
-            Class<?> clazz = ClassUtils.LOOKUP.findClass("jdk.internal.misc.Unsafe");
-            return ClassUtils.LOOKUP.findStatic(clazz, "getUnsafe", MethodType.methodType(clazz)).invoke();
-        } catch (Throwable e) {
-            e.printStackTrace();
-        }
-        return null;
-    }
-
     public static <T> T getFieldValue(Object target, String fieldName, Class<T> clazz) {
+        if (target == null) {
+            System.err.println("Cannot get field " + fieldName + " from null target");
+            return null;
+        }
         Class<?> searchClass = target.getClass();
         while (searchClass != null && searchClass != Object.class) {
             try {
@@ -94,29 +88,38 @@ public final class HelperLib {
     @SuppressWarnings("unchecked")
     public static <T> T getFieldValue(Field f, Object target, Class<T> clazz) {
         try {
-            long offset;
-            if (Modifier.isStatic(f.getModifiers())) {
-                target = Unsafe.getUnsafe().staticFieldBase(f);
-                offset = Unsafe.getUnsafe().staticFieldOffset(f);
-            } else offset = objectFieldOffset(f);
-            return (T) Unsafe.getUnsafe().getReference(target, offset);
-        } catch (Throwable e) {
-            e.printStackTrace();
+            return (T) readFieldValue(f, target);
+        } catch (Throwable lookupException) {
+            try {
+                long offset;
+                if (Modifier.isStatic(f.getModifiers())) {
+                    target = UnsafeAccess.staticFieldBase(f);
+                    offset = UnsafeAccess.staticFieldOffset(f);
+                } else offset = objectFieldOffset(f);
+                return (T) UnsafeAccess.getObject(target, offset);
+            } catch (Throwable unsafeException) {
+                lookupException.addSuppressed(unsafeException);
+                lookupException.printStackTrace();
+            }
         }
         return null;
     }
 
+    private static Object readFieldValue(Field f, Object target) throws Throwable {
+        f.trySetAccessible();
+        MethodHandle getter = ClassUtils.LOOKUP.unreflectGetter(f);
+        if (Modifier.isStatic(f.getModifiers())) {
+            return getter.invoke();
+        }
+        return getter.invoke(target);
+    }
+
     public static long objectFieldOffset(Field f) {
         try {
-            return Unsafe.getUnsafe().objectFieldOffset(f);
+            return UnsafeAccess.objectFieldOffset(f);
         } catch (Throwable e) {
-            try {
-                return (long) ClassUtils.methodhandle.invoke(f);
-            } catch (Throwable t1) {
-                t1.printStackTrace();
-            }
+            throw new IllegalStateException("Cannot get object field offset for " + f, e);
         }
-        return 0L;
     }
 
     public static <T> T getFieldValue(Class<?> target, String fieldName, Class<T> clazz) {
@@ -133,6 +136,16 @@ public final class HelperLib {
             setFieldValue(target.getClass().getDeclaredField(fieldName), target, value);
         } catch (Throwable e) {
             e.printStackTrace();
+        }
+    }
+
+    private static void setFieldValueWithLookup(Field f, Object target, Object value) throws Throwable {
+        f.trySetAccessible();
+        MethodHandle setter = ClassUtils.LOOKUP.unreflectSetter(f);
+        if (Modifier.isStatic(f.getModifiers())) {
+            setter.invoke(value);
+        } else {
+            setter.invoke(target, value);
         }
     }
 
@@ -156,12 +169,17 @@ public final class HelperLib {
         try {
             long offset;
             if (Modifier.isStatic(f.getModifiers())) {
-                target = Unsafe.getUnsafe().staticFieldBase(f);
-                offset = Unsafe.getUnsafe().staticFieldOffset(f);
+                target = UnsafeAccess.staticFieldBase(f);
+                offset = UnsafeAccess.staticFieldOffset(f);
             } else offset = objectFieldOffset(f);
-            Unsafe.getUnsafe().putReference(target, offset, value);
+            UnsafeAccess.putObject(target, offset, value);
         } catch (Throwable e) {
-            e.printStackTrace();
+            try {
+                setFieldValueWithLookup(f, target, value);
+            } catch (Throwable lookupException) {
+                e.addSuppressed(lookupException);
+                e.printStackTrace();
+            }
         }
     }
 
@@ -181,17 +199,30 @@ public final class HelperLib {
     @SuppressWarnings({"ConstantConditions", "unchecked", "rawtypes"})
     public static void coexistenceCoreAndMod() {
         List<NamedPath> found = HelperLib.getFieldValue(ModDirTransformerDiscoverer.class, "found", List.class);
-        found.removeIf(namedPath -> HelperLib.getJarPath(HelperLib.class).equals(namedPath.paths()[0].toString()));
+        String currentJarPath = HelperLib.getJarPath(HelperLib.class);
+        if (found != null) {
+            found.removeIf(namedPath -> Arrays.stream(namedPath.paths()).anyMatch(path -> currentJarPath.equals(path.toString())));
+        }
 
-        HelperLib.getFieldValue(HelperLib.getFieldValue(Launcher.INSTANCE, "moduleLayerHandler", ModuleLayerHandler.class), "completedLayers", EnumMap.class).values().forEach(layerInfo -> {
+        ModuleLayerHandler moduleLayerHandler = HelperLib.getFieldValue(Launcher.INSTANCE, "moduleLayerHandler", ModuleLayerHandler.class);
+        EnumMap completedLayers = moduleLayerHandler == null ? null : HelperLib.getFieldValue(moduleLayerHandler, "completedLayers", EnumMap.class);
+        if (completedLayers == null) return;
+
+        String moduleName = HelperLib.class.getModule().getName();
+        completedLayers.values().forEach(layerInfo -> {
             ModuleLayer layer = HelperLib.getFieldValue(layerInfo, "layer", ModuleLayer.class);
+            if (layer == null) return;
 
             layer.modules().forEach(module -> {
-                if (module.getName().equals(HelperLib.class.getModule().getName())) {
-                    Set<ResolvedModule> modules = new HashSet<>(HelperLib.getFieldValue(layer.configuration(), "modules", Set.class));
-                    Map<String, ResolvedModule> nameToModule = new HashMap(HelperLib.getFieldValue(layer.configuration(), "nameToModule", Map.class));
+                if (moduleName.equals(module.getName())) {
+                    Set<ResolvedModule> existingModules = HelperLib.getFieldValue(layer.configuration(), "modules", Set.class);
+                    Map<String, ResolvedModule> existingNameToModule = HelperLib.getFieldValue(layer.configuration(), "nameToModule", Map.class);
+                    if (existingModules == null || existingNameToModule == null) return;
 
-                    modules.remove(nameToModule.remove(HelperLib.class.getModule().getName()));
+                    Set<ResolvedModule> modules = new HashSet<>(existingModules);
+                    Map<String, ResolvedModule> nameToModule = new HashMap<>(existingNameToModule);
+
+                    modules.remove(nameToModule.remove(moduleName));
 
                     HelperLib.setFieldValue(layer.configuration(), "modules", modules);
                     HelperLib.setFieldValue(layer.configuration(), "nameToModule", nameToModule);
