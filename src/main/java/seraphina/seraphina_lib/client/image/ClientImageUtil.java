@@ -17,10 +17,25 @@ import java.awt.Color;
 import java.awt.image.BufferedImage;
 import java.util.Locale;
 
+/**
+ * Client-side image helpers shared by dynamic image renderers.
+ */
 public final class ClientImageUtil {
     private ClientImageUtil() {
     }
 
+    /**
+     * Draws a full textured quad using the supplied texture and tint.
+     *
+     * @param graphics current GUI graphics context
+     * @param textureLocation texture to bind
+     * @param x left coordinate
+     * @param y top coordinate
+     * @param width quad width
+     * @param height quad height
+     * @param alpha opacity in the range {@code 0.0F} to {@code 1.0F}
+     * @param tint optional tint color; {@code null} uses white
+     */
     public static void drawTexturedQuad(GuiGraphics graphics, ResourceLocation textureLocation,
                                         float x, float y, float width, float height, float alpha, Color tint) {
         Matrix4f matrix = graphics.pose().last().pose();
@@ -45,6 +60,12 @@ public final class ClientImageUtil {
         Tesselator.getInstance().end();
     }
 
+    /**
+     * Converts an AWT buffered image to Minecraft's RGBA {@link NativeImage} format.
+     *
+     * @param image source image
+     * @return converted native image
+     */
     public static NativeImage toNativeImage(BufferedImage image) {
         int width = image.getWidth();
         int height = image.getHeight();
@@ -64,6 +85,13 @@ public final class ClientImageUtil {
         return nativeImage;
     }
 
+    /**
+     * Creates, uploads, and registers a dynamic texture with Minecraft's texture manager.
+     *
+     * @param location texture resource location
+     * @param nativeImage pixel data to upload
+     * @return registered dynamic texture
+     */
     public static DynamicTexture createAndRegisterTexture(ResourceLocation location, NativeImage nativeImage) {
         DynamicTexture texture = new DynamicTexture(nativeImage);
         texture.setFilter(true, false);
@@ -72,12 +100,23 @@ public final class ClientImageUtil {
         return texture;
     }
 
+    /**
+     * Replaces the pixel data of an existing dynamic texture and uploads it.
+     *
+     * @param texture texture to update
+     * @param nativeImage replacement pixels
+     */
     public static void updateTexture(DynamicTexture texture, NativeImage nativeImage) {
         texture.setPixels(nativeImage);
         texture.setFilter(true, false);
         texture.upload();
     }
 
+    /**
+     * Runs a task immediately on the render thread or schedules it as a render call.
+     *
+     * @param runnable render-thread task
+     */
     public static void executeRenderCall(Runnable runnable) {
         if (RenderSystem.isOnRenderThread()) {
             runnable.run();
@@ -86,10 +125,22 @@ public final class ClientImageUtil {
         }
     }
 
+    /**
+     * Sanitizes a path so it can be reused in generated resource locations.
+     *
+     * @param path source path
+     * @return lowercase path with unsupported characters replaced by underscores
+     */
     public static String sanitizePath(String path) {
         return path.toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9/._-]", "_");
     }
 
+    /**
+     * Clamps a float to the inclusive {@code [0, 1]} range.
+     *
+     * @param value value to clamp
+     * @return clamped value
+     */
     public static float clamp01(float value) {
         if (value < 0.0F) {
             return 0.0F;

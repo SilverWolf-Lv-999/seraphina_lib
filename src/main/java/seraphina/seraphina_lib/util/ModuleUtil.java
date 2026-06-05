@@ -11,9 +11,22 @@ import java.util.LinkedHashSet;
 import java.util.Optional;
 import java.util.Set;
 
+/**
+ * Opens JDK and runtime modules required by SeraphinaLib's deep reflection code.
+ * <p>
+ * The library uses internal JDK APIs for class definition, field access, and
+ * launch-time transformation. This helper centralizes the module export/open
+ * calls needed before those APIs are accessed.
+ */
 public class ModuleUtil {
+    /**
+     * Logger used by module bootstrap operations.
+     */
     public static final Logger LOGGER = LoggerFactory.getLogger(ModuleUtil.class);
 
+    /**
+     * Shared module utility instance used during static bootstrap.
+     */
     public static final ModuleUtil INSTANCE = new ModuleUtil();
 
     private static final String[] CURRENT_MODULE_READER_MODULE_PREFIXES = {
@@ -42,6 +55,11 @@ public class ModuleUtil {
             {"java.base", "java.lang"}
     };
 
+    /**
+     * Opens all required JDK module packages to the module that owns {@code clazz}.
+     *
+     * @param clazz class whose module receives reflective access
+     */
     public void openAllRequiredModules(Class<?> clazz) {
         Module currentModule = clazz.getModule();
         ModuleLayer bootLayer = ModuleLayer.boot();
@@ -60,6 +78,12 @@ public class ModuleUtil {
         }
     }
 
+    /**
+     * Exports and opens all packages in the module that owns {@code clazz} to
+     * known modules that need to read the library at runtime.
+     *
+     * @param clazz class whose module packages should be opened
+     */
     public void openCurrentModuleToAllRequiredModules(Class<?> clazz) {
         Module currentModule = clazz.getModule();
         ModuleLayer bootLayer = ModuleLayer.boot();

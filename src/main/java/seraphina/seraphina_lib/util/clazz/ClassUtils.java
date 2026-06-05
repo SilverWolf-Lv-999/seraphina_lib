@@ -19,13 +19,30 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 
+/**
+ * Utilities for privileged lookup access and hidden class definition.
+ * <p>
+ * This class relies on internal JVM entry points and should be used only during
+ * controlled launch-time or transformer workflows.
+ */
 public class ClassUtils {
 	static ClassUtils Instance = null;
 	static final Logger LOGGER = LoggerFactory.getLogger(ClassUtils.class);
+	/**
+	 * Cache of hidden classes keyed by their original or generated names.
+	 */
 	public Map<String, Class<?>> hiddenClassMap = new HashMap<>();
 	public static MethodHandle methodhandle;
+	/**
+	 * Trusted lookup used for private and internal member access.
+	 */
 	public static final MethodHandles.Lookup LOOKUP = getInstance().getLookup();
 
+	/**
+	 * Returns the shared {@link ClassUtils} instance.
+	 *
+	 * @return singleton utility instance
+	 */
 	public static ClassUtils getInstance() {
 		if (Instance == null) {
 			Instance = new ClassUtils();
@@ -33,6 +50,11 @@ public class ClassUtils {
 		return Instance;
 	}
 
+	/**
+	 * Resolves a trusted {@link MethodHandles.Lookup} instance.
+	 *
+	 * @return lookup capable of accessing private members, or {@code null} if it cannot be created
+	 */
 	public  MethodHandles.Lookup getLookup() {
 		try {
 			Field implLookupField = MethodHandles.Lookup.class.getDeclaredField("IMPL_LOOKUP");
@@ -51,10 +73,23 @@ public class ClassUtils {
 		return null;
 	}
 
+	/**
+	 * Defines a hidden copy of a class from this library package.
+	 *
+	 * @param klassName binary name of the class to load from resources
+	 * @param loader class loader to define the hidden class into
+	 * @return defined hidden class
+	 */
 	public Class<?> defineHiddenPackageClass(String klassName, ClassLoader loader) {
 		return this.defineHiddenPackageClass(klassName, loader, ClassUtils.class,  true, ClassOption.STRONG);
 	}
 
+	/**
+	 * Defines a hidden copy of a class using the system class loader.
+	 *
+	 * @param name binary name of the class to load from resources
+	 * @return defined hidden class
+	 */
     public Class<?> defineHiddenPackageClass(String name) {
         return this.defineHiddenPackageClass(name, ClassLoader.getSystemClassLoader());
     }
@@ -115,6 +150,19 @@ public class ClassUtils {
 //		}
 //	}
 
+	/**
+	 * Defines a hidden class from raw class bytes.
+	 *
+	 * @param name cache key and binary class name
+	 * @param loader target class loader
+	 * @param lookup lookup class used as the hidden-class host
+	 * @param b class file bytes
+	 * @param off byte array offset
+	 * @param len byte length
+	 * @param initialize whether to initialize the class immediately
+	 * @param options hidden-class options
+	 * @return defined hidden class
+	 */
 	public Class<?> defineHiddenClass(String name, ClassLoader loader, Class<?> lookup, byte[] b, int off, int len, boolean initialize, ClassOption... options) {
 		try {
 			if (hiddenClassMap.containsKey(name) && hiddenClassMap.get(name) != null) {
@@ -132,6 +180,16 @@ public class ClassUtils {
 		}
 	}
 
+	/**
+	 * Loads a class resource, remaps its internal name, and defines it as a hidden class.
+	 *
+	 * @param originalName binary name of the class resource to load
+	 * @param loader target class loader
+	 * @param lookup lookup class used as the resource owner and hidden-class host
+	 * @param initialize whether to initialize the class immediately
+	 * @param options hidden-class options
+	 * @return defined hidden class
+	 */
 	public Class<?> defineHiddenPackageClass(String originalName, ClassLoader loader, Class<?> lookup, boolean initialize, ClassOption... options) {
 		try {
 			final String hiddenClassName = "Nega";
@@ -178,6 +236,13 @@ public class ClassUtils {
 		}
 	}
 
+	/**
+	 * Rewrites a class file's internal name to the hidden-class placeholder name.
+	 *
+	 * @param classBytes source class file bytes
+	 * @param oldClassName original binary class name
+	 * @return remapped class file bytes
+	 */
 	public byte[] remapClassName(byte[] classBytes, String oldClassName) {
 		String oldInternal = oldClassName.replace('.', '/');
 		ClassReader reader = new ClassReader(classBytes);
@@ -188,14 +253,36 @@ public class ClassUtils {
 		return writer.toByteArray();
 	}
 
+	/**
+	 * Defines a hidden package class using the lookup class loader.
+	 *
+	 * @param name binary name of the class resource to load
+	 * @param lookup lookup class used as the hidden-class host
+	 * @param initialize whether to initialize the class immediately
+	 * @param options hidden-class options
+	 * @return defined hidden class
+	 */
 	public Class<?> defineHiddenPackageClass(String name, Class<?> lookup, boolean initialize, ClassOption... options) {
 		return defineHiddenPackageClass(name, lookup.getClassLoader(), lookup, initialize, options);
 	}
 
+	/**
+	 * Defines a strong hidden package class using the lookup class loader.
+	 *
+	 * @param name binary name of the class resource to load
+	 * @param lookup lookup class used as the hidden-class host
+	 * @return defined hidden class
+	 */
 	public Class<?> defineHiddenPackageClass(String name, Class<?> lookup) {
 		return defineHiddenPackageClass(name, lookup.getClassLoader(), lookup, true, ClassOption.STRONG);
 	}
 
+	/**
+	 * Finds a class through the trusted lookup.
+	 *
+	 * @param name binary class name
+	 * @return found class, or {@code null} when it is not visible
+	 */
 	public Class<?> findClass(String name) {
 		try {
 			return LOOKUP.findClass(name);
@@ -206,6 +293,9 @@ public class ClassUtils {
         }
     }
 
+	/**
+	 * Disables self-attach support through system properties and known HotSpot internals.
+	 */
 	public void prohibitedAttachSelf() {
 		System.setProperty("jdk.attach.allowAttachSelf", "false");
 		try {

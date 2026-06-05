@@ -6,12 +6,22 @@ import java.lang.annotation.RetentionPolicy;
 import java.lang.annotation.Target;
 
 /**
- * 重写方法 须static
+ * Replaces one or more target methods with the annotated mixin method body.
  */
 @Retention(RetentionPolicy.RUNTIME)
 @Target(ElementType.METHOD)
 public @interface Overwrite {
+    /**
+     * Target method names in the transformed class.
+     *
+     * @return method names to overwrite
+     */
     String[] methodName();
 
+    /**
+     * Target method descriptor.
+     *
+     * @return JVM method descriptor
+     */
     String desc();
 }

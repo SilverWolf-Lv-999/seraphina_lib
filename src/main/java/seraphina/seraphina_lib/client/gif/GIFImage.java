@@ -41,20 +41,37 @@ public class GIFImage {
     private boolean loaded;
     private boolean failed;
 
+    /**
+     * Creates a lazily loaded GIF image.
+     *
+     * @param location resource location of the GIF asset
+     */
     public GIFImage(ResourceLocation location) {
         this.location = Objects.requireNonNull(location, "location");
     }
 
+    /**
+     * Sets the playback speed multiplier.
+     *
+     * @param animationSpeed positive finite speed multiplier
+     * @return this image instance for chaining
+     */
     public GIFImage setAnimationSpeed(float animationSpeed) {
         this.animationSpeed = Float.isFinite(animationSpeed) && animationSpeed > 0.0F ? animationSpeed : 1.0F;
         return this;
     }
 
+    /**
+     * Restarts animated playback from the first frame.
+     */
     public void restartAnimation() {
         animationStartMillis = System.currentTimeMillis();
         currentFrameIndex = 0;
     }
 
+    /**
+     * Loads the GIF if necessary and advances the current frame for real-time playback.
+     */
     public void update() {
         ensureLoaded();
         if (!loaded || failed || frames.isEmpty()) {
@@ -64,6 +81,11 @@ public class GIFImage {
         currentFrameIndex = frameIndexAt(currentAnimationMillis());
     }
 
+    /**
+     * Returns the texture location for the current animated frame.
+     *
+     * @return current frame texture, or the original location if loading failed
+     */
     public ResourceLocation getTextureLocation() {
         update();
         if (!loaded || failed || frameLocations.isEmpty()) {
@@ -72,30 +94,100 @@ public class GIFImage {
         return frameLocations.get(currentFrameIndex);
     }
 
+    /**
+     * Draws the current animated frame at full opacity.
+     *
+     * @param graphics current GUI graphics context
+     * @param x left coordinate
+     * @param y top coordinate
+     * @param width draw width
+     * @param height draw height
+     */
     public void draw(GuiGraphics graphics, float x, float y, float width, float height) {
         draw(graphics, x, y, width, height, 1.0F);
     }
 
+    /**
+     * Draws the current animated frame with custom opacity.
+     *
+     * @param graphics current GUI graphics context
+     * @param x left coordinate
+     * @param y top coordinate
+     * @param width draw width
+     * @param height draw height
+     * @param alpha opacity in the range {@code 0.0F} to {@code 1.0F}
+     */
     public void draw(GuiGraphics graphics, float x, float y, float width, float height, float alpha) {
         draw(graphics, x, y, width, height, alpha, Color.WHITE);
     }
 
+    /**
+     * Draws the current animated frame with custom opacity and tint.
+     *
+     * @param graphics current GUI graphics context
+     * @param x left coordinate
+     * @param y top coordinate
+     * @param width draw width
+     * @param height draw height
+     * @param alpha opacity in the range {@code 0.0F} to {@code 1.0F}
+     * @param tint tint color
+     */
     public void draw(GuiGraphics graphics, float x, float y, float width, float height, float alpha, Color tint) {
         drawInternal(graphics, x, y, width, height, alpha, tint, true, -1);
     }
 
+    /**
+     * Draws the first GIF frame at full opacity.
+     *
+     * @param graphics current GUI graphics context
+     * @param x left coordinate
+     * @param y top coordinate
+     * @param width draw width
+     * @param height draw height
+     */
     public void drawStatic(GuiGraphics graphics, float x, float y, float width, float height) {
         drawStatic(graphics, x, y, width, height, 1.0F);
     }
 
+    /**
+     * Draws the first GIF frame with custom opacity.
+     *
+     * @param graphics current GUI graphics context
+     * @param x left coordinate
+     * @param y top coordinate
+     * @param width draw width
+     * @param height draw height
+     * @param alpha opacity in the range {@code 0.0F} to {@code 1.0F}
+     */
     public void drawStatic(GuiGraphics graphics, float x, float y, float width, float height, float alpha) {
         drawInternal(graphics, x, y, width, height, alpha, Color.WHITE, false, 0);
     }
 
+    /**
+     * Draws the frame corresponding to an explicit animation time at full opacity.
+     *
+     * @param graphics current GUI graphics context
+     * @param x left coordinate
+     * @param y top coordinate
+     * @param width draw width
+     * @param height draw height
+     * @param timeSeconds animation time in seconds
+     */
     public void drawAtTime(GuiGraphics graphics, float x, float y, float width, float height, float timeSeconds) {
         drawAtTime(graphics, x, y, width, height, timeSeconds, 1.0F);
     }
 
+    /**
+     * Draws the frame corresponding to an explicit animation time.
+     *
+     * @param graphics current GUI graphics context
+     * @param x left coordinate
+     * @param y top coordinate
+     * @param width draw width
+     * @param height draw height
+     * @param timeSeconds animation time in seconds
+     * @param alpha opacity in the range {@code 0.0F} to {@code 1.0F}
+     */
     public void drawAtTime(GuiGraphics graphics, float x, float y, float width, float height, float timeSeconds, float alpha) {
         int timeMillis = Math.max(0, (int) (timeSeconds * 1000.0F));
         drawInternal(graphics, x, y, width, height, alpha, Color.WHITE, false, timeMillis);

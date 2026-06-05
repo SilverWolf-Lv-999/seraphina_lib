@@ -28,9 +28,21 @@ import java.util.*;
 import java.util.jar.JarEntry;
 import java.util.jar.JarFile;
 
+/**
+ * General reflection, module, and class-resource helpers used by the library.
+ * <p>
+ * Most methods in this class are low-level utilities for launch-time code where
+ * normal reflective access can be blocked by modules or access checks.
+ */
 public final class HelperLib {
     static final Logger LOGGER = LoggerFactory.getLogger(HelperLib.class);
 
+    /**
+     * Returns the filesystem path of the jar or classpath location that contains
+     * {@link HelperLib}.
+     *
+     * @return absolute jar path, or an empty string when it cannot be resolved
+     */
     public static String getJarPath() {
         try {
             CodeSource codeSource = HelperLib.class.getProtectionDomain().getCodeSource();
@@ -44,6 +56,14 @@ public final class HelperLib {
         return "";
     }
 
+    /**
+     * Copies non-static field values from one object to another object by field name.
+     * <p>
+     * Fields that cannot be read or written are logged and skipped.
+     *
+     * @param old source object
+     * @param next target object
+     */
     public static void copyFields(Object old, Object next) {
         Map<String, Object> oldFieldMap = new HashMap<>();
         for (Field field : old.getClass().getDeclaredFields()) {
@@ -67,6 +87,15 @@ public final class HelperLib {
         }
     }
 
+    /**
+     * Reads a field value from an object, searching the target class hierarchy.
+     *
+     * @param target object to read from
+     * @param fieldName declared field name
+     * @param clazz expected field type token
+     * @param <T> expected result type
+     * @return field value cast to {@code T}, or {@code null} when not found or unreadable
+     */
     public static <T> T getFieldValue(Object target, String fieldName, Class<T> clazz) {
         if (target == null) {
             System.err.println("Cannot get field " + fieldName + " from null target");
@@ -85,6 +114,15 @@ public final class HelperLib {
         return null;
     }
 
+    /**
+     * Reads a field value using method handles first and {@code Unsafe} as fallback.
+     *
+     * @param f field to read
+     * @param target target object for instance fields, or {@code null} for static fields
+     * @param clazz expected field type token
+     * @param <T> expected result type
+     * @return field value cast to {@code T}, or {@code null} if both access paths fail
+     */
     @SuppressWarnings("unchecked")
     public static <T> T getFieldValue(Field f, Object target, Class<T> clazz) {
         try {
@@ -114,6 +152,13 @@ public final class HelperLib {
         return getter.invoke(target);
     }
 
+    /**
+     * Returns the {@code Unsafe} offset for an instance field.
+     *
+     * @param f instance field
+     * @return memory offset for the field
+     * @throws IllegalStateException if the offset cannot be resolved
+     */
     public static long objectFieldOffset(Field f) {
         try {
             return UnsafeAccess.objectFieldOffset(f);
@@ -122,6 +167,15 @@ public final class HelperLib {
         }
     }
 
+    /**
+     * Reads a static field declared directly on a class.
+     *
+     * @param target class that declares the field
+     * @param fieldName declared field name
+     * @param clazz expected field type token
+     * @param <T> expected result type
+     * @return field value cast to {@code T}, or {@code null} when it cannot be read
+     */
     public static <T> T getFieldValue(Class<?> target, String fieldName, Class<T> clazz) {
         try {
             return getFieldValue(target.getDeclaredField(fieldName), (Object) null, clazz);
@@ -131,6 +185,13 @@ public final class HelperLib {
         return null;
     }
 
+    /**
+     * Writes a field value on the target object by declared field name.
+     *
+     * @param target object whose declared field should be written
+     * @param fieldName declared field name
+     * @param value new field value
+     */
     public static void setFieldValue(Object target, String fieldName, Object value) {
         try {
             setFieldValue(target.getClass().getDeclaredField(fieldName), target, value);
@@ -149,6 +210,13 @@ public final class HelperLib {
         }
     }
 
+    /**
+     * Returns all methods declared by a class and its superclasses, excluding
+     * {@link Object}.
+     *
+     * @param clazz class whose hierarchy should be scanned
+     * @return declared methods from the class hierarchy
+     */
     public static Method[] getAllDeclaredMethods(Class<?> clazz) {
         ArrayList<Method> methods = new ArrayList<>();
         for (Class<?> currentClass = clazz; currentClass != null && currentClass != Object.class; currentClass = currentClass.getSuperclass()) {
@@ -157,6 +225,13 @@ public final class HelperLib {
         return methods.toArray(new Method[0]);
     }
 
+    /**
+     * Returns all fields declared by a class and its superclasses, excluding
+     * {@link Object}.
+     *
+     * @param clazz class whose hierarchy should be scanned
+     * @return declared fields from the class hierarchy
+     */
     public static Field[] getAllDeclaredFields(Class<?> clazz) {
         ArrayList<Field> fields = new ArrayList<>();
         for (Class<?> currentClass = clazz; currentClass != null && currentClass != Object.class; currentClass = currentClass.getSuperclass()) {
@@ -165,6 +240,13 @@ public final class HelperLib {
         return fields.toArray(new Field[0]);
     }
 
+    /**
+     * Writes a field value using {@code Unsafe} first and method handles as fallback.
+     *
+     * @param f field to write
+     * @param target target object for instance fields, or {@code null} for static fields
+     * @param value new field value
+     */
     public static void setFieldValue(Field f, Object target, Object value) {
         try {
             long offset;
@@ -183,6 +265,12 @@ public final class HelperLib {
         }
     }
 
+    /**
+     * Returns the jar path that contains the supplied class.
+     *
+     * @param clazz class whose code source should be inspected
+     * @return decoded jar path
+     */
     public static String getJarPath(Class<?> clazz) {
         String file = clazz.getProtectionDomain().getCodeSource().getLocation().getPath();
         if (!file.isEmpty()) {
@@ -196,6 +284,10 @@ public final class HelperLib {
         return URLDecoder.decode(file, StandardCharsets.UTF_8);
     }
 
+    /**
+     * Removes the library jar from selected Forge loader structures when the same
+     * code is present as both a core component and a mod.
+     */
     @SuppressWarnings({"ConstantConditions", "unchecked", "rawtypes"})
     public static void coexistenceCoreAndMod() {
         List<NamedPath> found = HelperLib.getFieldValue(ModDirTransformerDiscoverer.class, "found", List.class);
@@ -231,6 +323,14 @@ public final class HelperLib {
         });
     }
 
+    /**
+     * Copies non-static fields declared on a specific class from {@code source} to
+     * {@code target}.
+     *
+     * @param clazz class declaring the fields to copy
+     * @param source object to read from
+     * @param target object to write to
+     */
     public static void copyProperties(Class<?> clazz, Object source, Object target) {
         try {
             Field[] fields = clazz.getDeclaredFields();
@@ -246,6 +346,13 @@ public final class HelperLib {
         }
     }
 
+    /**
+     * Reads bytecode for a loaded class from its class loader resource path.
+     *
+     * @param c class whose bytecode should be read
+     * @return class file bytes, or {@code null} if the resource is unavailable
+     * @throws IOException if the class resource cannot be read
+     */
     public static byte[] getClassBytes(Class<?> c) throws IOException {
         String className = c.getName();
         String classAsPath = className.replace('.', '/') + ".class";
@@ -253,6 +360,14 @@ public final class HelperLib {
         return stream == null ? null : IOUtils.toByteArray(stream);
     }
 
+    /**
+     * Reads bytecode for a class stored inside a jar file.
+     *
+     * @param jarPath path to the jar file
+     * @param className binary class name
+     * @return class file bytes
+     * @throws Exception when the jar cannot be read or the class entry is missing
+     */
     public static byte[] getClassBytes(String jarPath, String className) throws Exception {
         try (JarFile jarFile = new JarFile(jarPath)) {
             String classPath = className.replace('.', '/') + ".class";
@@ -267,6 +382,12 @@ public final class HelperLib {
         }
     }
 
+    /**
+     * Reads bytecode for a class from the jar that contains {@link HelperLib}.
+     *
+     * @param className binary class name
+     * @return class file bytes, or {@code null} when the class cannot be read
+     */
     public static byte[] getClassBytes(String className) {
         try {
              return getClassBytes(HelperLib.getJarPath(), className);
@@ -275,6 +396,13 @@ public final class HelperLib {
         }
     }
 
+    /**
+     * Reads all bytes from an input stream.
+     *
+     * @param is stream to consume
+     * @return byte array containing the complete stream contents
+     * @throws IOException if the stream cannot be read
+     */
     public static byte[] readAllBytes(InputStream is) throws IOException {
         ByteArrayOutputStream buffer = new ByteArrayOutputStream();
         byte[] data = new byte[4096];

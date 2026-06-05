@@ -6,18 +6,23 @@ import java.lang.annotation.RetentionPolicy;
 import java.lang.annotation.Target;
 
 /**
- * 返回值信息
+ * Describes whether an injection callback can cancel execution and provide a
+ * return value.
  */
 @Retention(RetentionPolicy.RUNTIME)
 @Target(ElementType.FIELD)
 public @interface CallbackInfo {
     /**
-     * 是否返回
+     * Whether the callback should return to the caller instead of continuing.
+     *
+     * @return {@code true} when the callback is allowed to return
      */
     boolean callback() default false;
 
     /**
-     * 返回值类型
+     * Return value type used when {@link #callback()} is enabled.
+     *
+     * @return return value type
      */
     Class<?> type() default void.class;
 }

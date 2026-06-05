@@ -18,6 +18,9 @@ import java.util.Objects;
 /**
  * @author Seraphina
  * @version 1.0
+ *
+ * SVG renderer that rasterizes SVG resources into dynamic textures and supports
+ * simple animated SVG attributes.
  */
 @OnlyIn(Dist.CLIENT)
 public class SvgImage {
@@ -43,10 +46,22 @@ public class SvgImage {
     private boolean loaded;
     private boolean failed;
 
+    /**
+     * Creates a lazily loaded SVG image with a 256x256 backing texture.
+     *
+     * @param svgLocation resource location of the SVG asset
+     */
     public SvgImage(ResourceLocation svgLocation) {
         this(svgLocation, 256, 256);
     }
 
+    /**
+     * Creates a lazily loaded SVG image with a fixed backing texture size.
+     *
+     * @param svgLocation resource location of the SVG asset
+     * @param textureWidth backing texture width
+     * @param textureHeight backing texture height
+     */
     public SvgImage(ResourceLocation svgLocation, int textureWidth, int textureHeight) {
         this.svgLocation = Objects.requireNonNull(svgLocation, "svgLocation");
         this.textureWidth = Math.max(1, textureWidth);
@@ -59,30 +74,61 @@ public class SvgImage {
         this.currentTextureLocation = textureLocation;
     }
 
+    /**
+     * Returns the texture location for the current rasterized SVG frame.
+     *
+     * @return current texture location
+     */
     public ResourceLocation getTextureLocation() {
         ensureLoaded();
         return currentTextureLocation;
     }
 
+    /**
+     * Returns the repeating dynamic texture used by the SVG renderer.
+     *
+     * @return dynamic texture for the image
+     */
     public DynamicTexture getTexture() {
         return textureFrames.texture();
     }
 
+    /**
+     * Sets the SVG animation speed multiplier.
+     *
+     * @param animationSpeed positive finite speed multiplier
+     * @return this image instance for chaining
+     */
     public SvgImage setAnimationSpeed(float animationSpeed) {
         this.animationSpeed = Float.isFinite(animationSpeed) && animationSpeed > 0.0F ? animationSpeed : 1.0F;
         return this;
     }
 
+    /**
+     * Enables or disables paint animation attributes when collecting the SVG timeline.
+     *
+     * @param paintAnimationsEnabled {@code true} to apply paint animations
+     * @return this image instance for chaining
+     */
     public SvgImage setPaintAnimationsEnabled(boolean paintAnimationsEnabled) {
         this.paintAnimationsEnabled = paintAnimationsEnabled;
         return this;
     }
 
+    /**
+     * Sets a fallback color used when paint animations are disabled.
+     *
+     * @param color replacement paint color, or {@code null} to keep original values
+     * @return this image instance for chaining
+     */
     public SvgImage setDisabledPaintAnimationColor(Color color) {
         this.disabledPaintAnimationColor = color;
         return this;
     }
 
+    /**
+     * Loads the SVG if necessary and updates the current rasterized animation frame.
+     */
     public void update() {
         if (!loaded || failed || !animationTimeline.animated() || animationComplete) {
             return;
@@ -96,31 +142,105 @@ public class SvgImage {
         }
     }
 
+    /**
+     * Draws the current SVG frame at full opacity.
+     *
+     * @param graphics current GUI graphics context
+     * @param x left coordinate
+     * @param y top coordinate
+     * @param width draw width
+     * @param height draw height
+     */
     public void draw(GuiGraphics graphics, float x, float y, float width, float height) {
         draw(graphics, x, y, width, height, 1.0F);
     }
 
+    /**
+     * Draws the current SVG frame with custom opacity.
+     *
+     * @param graphics current GUI graphics context
+     * @param x left coordinate
+     * @param y top coordinate
+     * @param width draw width
+     * @param height draw height
+     * @param alpha opacity in the range {@code 0.0F} to {@code 1.0F}
+     */
     public void draw(GuiGraphics graphics, float x, float y, float width, float height, float alpha) {
         draw(graphics, x, y, width, height, alpha, Color.WHITE);
     }
 
+    /**
+     * Draws the current SVG frame with custom opacity and tint.
+     *
+     * @param graphics current GUI graphics context
+     * @param x left coordinate
+     * @param y top coordinate
+     * @param width draw width
+     * @param height draw height
+     * @param alpha opacity in the range {@code 0.0F} to {@code 1.0F}
+     * @param tint tint color
+     */
     public void draw(GuiGraphics graphics, float x, float y, float width, float height, float alpha, Color tint) {
         drawInternal(graphics, x, y, width, height, alpha, tint, Float.NaN);
     }
 
+    /**
+     * Draws the SVG frame for an explicit animation time.
+     *
+     * @param graphics current GUI graphics context
+     * @param x left coordinate
+     * @param y top coordinate
+     * @param width draw width
+     * @param height draw height
+     * @param timeSeconds animation time in seconds
+     * @param alpha opacity in the range {@code 0.0F} to {@code 1.0F}
+     */
     public void drawAtTime(GuiGraphics graphics, float x, float y, float width, float height, float timeSeconds, float alpha) {
         drawAtTime(graphics, x, y, width, height, timeSeconds, alpha, Color.WHITE);
     }
 
+    /**
+     * Draws the SVG frame for an explicit animation time with custom tint.
+     *
+     * @param graphics current GUI graphics context
+     * @param x left coordinate
+     * @param y top coordinate
+     * @param width draw width
+     * @param height draw height
+     * @param timeSeconds animation time in seconds
+     * @param alpha opacity in the range {@code 0.0F} to {@code 1.0F}
+     * @param tint tint color
+     */
     public void drawAtTime(GuiGraphics graphics, float x, float y, float width, float height,
                            float timeSeconds, float alpha, Color tint) {
         drawInternal(graphics, x, y, width, height, alpha, tint, Math.max(0.0F, timeSeconds));
     }
 
+    /**
+     * Draws the SVG at animation time {@code 0}.
+     *
+     * @param graphics current GUI graphics context
+     * @param x left coordinate
+     * @param y top coordinate
+     * @param width draw width
+     * @param height draw height
+     * @param alpha opacity in the range {@code 0.0F} to {@code 1.0F}
+     */
     public void drawStatic(GuiGraphics graphics, float x, float y, float width, float height, float alpha) {
         drawStatic(graphics, x, y, width, height, alpha, Color.WHITE);
     }
 
+    /**
+     * Draws the SVG at animation time {@code 0} with custom tint.
+     *
+     * @param graphics current GUI graphics context
+     * @param x left coordinate
+     * @param y top coordinate
+     * @param width draw width
+     * @param height draw height
+     * @param alpha opacity in the range {@code 0.0F} to {@code 1.0F}
+     * @param tint tint color
+     */
     public void drawStatic(GuiGraphics graphics, float x, float y, float width, float height, float alpha, Color tint) {
         drawInternal(graphics, x, y, width, height, alpha, tint, 0.0F);
     }

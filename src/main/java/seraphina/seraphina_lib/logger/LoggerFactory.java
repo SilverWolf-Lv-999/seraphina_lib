@@ -21,7 +21,7 @@ import java.text.SimpleDateFormat;
  *
  * <p><strong>使用示例：</strong></p>
  * <pre>
- * private static final LoggerFactory LOGGER = LoggerFactory.getLogger("MyClass");
+ * private static final Logger LOGGER = LoggerFactory.getLogger("MyClass");
  *
  * LOGGER.info("应用启动成功");
  * LOGGER.debug("用户ID: {}", userId);
@@ -36,16 +36,28 @@ public class LoggerFactory {
      * 创建并返回指定前缀的日志记录器实例。
      *
      * @param prefix 日志前缀，通常使用类名（如 "MyClass"）
-     * @return 配置好的 LoggerFactory 实例
+     * @return 配置好的 Logger 实例
      */
     public static Logger getLogger(String prefix) {
         return new Logger(prefix + "/");
     }
-    
+
+    /**
+     * Creates a logger using {@link Object#toString()} as the logger name.
+     *
+     * @param object object that supplies the logger name
+     * @return configured logger instance
+     */
     public static Logger getLogger(Object object) {
         return new Logger(object.toString());
     }
-    
+
+    /**
+     * Creates a logger using an abbreviated fully qualified class name.
+     *
+     * @param klass class that owns the logger
+     * @return configured logger instance
+     */
     public static Logger getLogger(Class<?> klass) {
         return new Logger(abbreviateClassName(klass.getName()));
     }
