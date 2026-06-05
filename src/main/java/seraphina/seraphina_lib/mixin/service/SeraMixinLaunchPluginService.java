@@ -36,8 +36,11 @@ import seraphina.seraphina_lib.service.ISeraMixin;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.net.JarURLConnection;
+import java.net.URL;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Enumeration;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.EnumSet;
@@ -50,6 +53,8 @@ import java.util.Objects;
 import java.util.ServiceConfigurationError;
 import java.util.ServiceLoader;
 import java.util.Set;
+import java.util.jar.JarEntry;
+import java.util.jar.JarFile;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 
@@ -76,6 +81,7 @@ public class SeraMixinLaunchPluginService implements ILaunchPluginService {
     private final Map<String, String> subclassCache = new ConcurrentHashMap<>();
     private final Map<String, ClassHierarchyInfo> hierarchyCache = new ConcurrentHashMap<>();
     private final Map<String, byte[]> classBytesCache = new ConcurrentHashMap<>();
+    private final List<SecureJar> resourceJars = new CopyOnWriteArrayList<>();
     private final Set<String> queuedServiceProviders = ConcurrentHashMap.newKeySet();
     private final Set<String> loadedServiceProviders = ConcurrentHashMap.newKeySet();
     private final ThreadLocal<String> currentTargetClass = new ThreadLocal<>();
@@ -176,6 +182,10 @@ public class SeraMixinLaunchPluginService implements ILaunchPluginService {
             return;
         }
         for (SecureJar resource : resources) {
+            if (resource == null) {
+                continue;
+            }
+            this.resourceJars.add(resource);
             this.readServiceProviderFile(resource);
         }
         this.serviceDiscoveryDone = false;
@@ -359,6 +369,10 @@ public class SeraMixinLaunchPluginService implements ILaunchPluginService {
         }
 
         if (mixinPath != null && !mixinPath.isBlank()) {
+            int registered = this.registerMixinPackage(mixinPath, provider.getClass().getClassLoader(), provider);
+            if (registered >= 0) {
+                return;
+            }
             try {
                 this.registerMixinFromASM(mixinPath, provider.getClass().getClassLoader(), provider);
                 return;
@@ -380,14 +394,186 @@ public class SeraMixinLaunchPluginService implements ILaunchPluginService {
     }
 
     private void registerMixinFromASM(String mixinClassName, ClassLoader mixinClassLoader, ISeraMixin hook) {
+        if (this.registerMixinIfAnnotatedFromASM(mixinClassName, mixinClassLoader, hook)) {
+            return;
+        }
+        String normalizedMixin = normalizeClassName(mixinClassName);
+        System.err.println("[SeraMixin] Missing @SeraMixin target on " + normalizedMixin);
+    }
+
+    private boolean registerMixinIfAnnotatedFromASM(String mixinClassName, ClassLoader mixinClassLoader, ISeraMixin hook) {
         String normalizedMixin = normalizeClassName(mixinClassName);
         String targetInternalName = this.readSeraMixinTargetInternalName(normalizedMixin, mixinClassLoader);
         if (targetInternalName == null || targetInternalName.isBlank()) {
-            System.err.println("[SeraMixin] Missing @SeraMixin target on " + normalizedMixin);
-            return;
+            return false;
         }
         int priority = hook == null ? 0 : safePriority(hook);
         this.register(normalizedMixin, targetInternalName, mixinClassLoader, hook, priority);
+        return true;
+    }
+
+    private int registerMixinPackage(String mixinPackageName, ClassLoader mixinClassLoader, ISeraMixin hook) {
+        String normalizedPackage = normalizePackageName(mixinPackageName);
+        List<String> mixinClassNames = this.findClassNamesInPackage(normalizedPackage, mixinClassLoader);
+        if (mixinClassNames.isEmpty()) {
+            return -1;
+        }
+
+        int registered = 0;
+        for (String mixinClassName : mixinClassNames) {
+            if (this.registerMixinIfAnnotatedFromASM(mixinClassName, mixinClassLoader, hook)) {
+                registered++;
+            }
+        }
+        if (registered == 0) {
+            System.err.println("[SeraMixin] No @SeraMixin classes found in package " + normalizedPackage);
+        }
+        return registered;
+    }
+
+    private List<String> findClassNamesInPackage(String packageName, ClassLoader preferredLoader) {
+        if (packageName == null || packageName.isBlank()) {
+            return List.of();
+        }
+
+        String packagePath = packageName.replace('.', '/');
+        LinkedHashSet<String> classNames = new LinkedHashSet<>();
+        this.findClassNamesFromClassLoaders(packagePath, preferredLoader, classNames);
+        this.findClassNamesFromSecureJars(packagePath, classNames);
+
+        ArrayList<String> result = new ArrayList<>(classNames);
+        result.sort(String::compareTo);
+        return result;
+    }
+
+    private void findClassNamesFromClassLoaders(String packagePath, ClassLoader preferredLoader, Set<String> classNames) {
+        for (ClassLoader candidate : this.classLoaderCandidates(preferredLoader)) {
+            try {
+                Enumeration<URL> resources = candidate.getResources(packagePath);
+                while (resources.hasMoreElements()) {
+                    this.scanPackageResource(resources.nextElement(), packagePath, classNames);
+                }
+            } catch (IOException exception) {
+                System.err.println("[SeraMixin] Failed to scan package " + packagePath + ": " + exception.getMessage());
+            }
+        }
+    }
+
+    private void findClassNamesFromSecureJars(String packagePath, Set<String> classNames) {
+        String[] pathParts = packagePath.split("/");
+        String firstPart = pathParts[0];
+        String[] remainingParts = java.util.Arrays.copyOfRange(pathParts, 1, pathParts.length);
+        for (SecureJar jar : this.resourceJars) {
+            try {
+                this.scanPackageDirectory(jar.getPath(firstPart, remainingParts), packagePath, classNames);
+            } catch (Throwable ignored) {
+            }
+        }
+    }
+
+    private void scanPackageResource(URL resource, String packagePath, Set<String> classNames) {
+        if (resource == null) {
+            return;
+        }
+        if ("jar".equals(resource.getProtocol())) {
+            try {
+                this.scanJarPackageResource(resource, packagePath, classNames);
+                return;
+            } catch (IOException exception) {
+                System.err.println("[SeraMixin] Failed to scan jar package " + packagePath + ": " + exception.getMessage());
+            }
+        }
+        try {
+            this.scanPackageDirectory(Path.of(resource.toURI()), packagePath, classNames);
+        } catch (Exception ignored) {
+        }
+    }
+
+    private void scanJarPackageResource(URL resource, String packagePath, Set<String> classNames) throws IOException {
+        var connection = resource.openConnection();
+        if (!(connection instanceof JarURLConnection jarConnection)) {
+            return;
+        }
+        jarConnection.setUseCaches(false);
+        try (JarFile jarFile = jarConnection.getJarFile()) {
+            this.scanJarFile(jarFile, packagePath, classNames);
+        }
+    }
+
+    private void scanJarFile(JarFile jarFile, String packagePath, Set<String> classNames) {
+        String packagePrefix = packagePath.endsWith("/") ? packagePath : packagePath + "/";
+        Enumeration<JarEntry> entries = jarFile.entries();
+        while (entries.hasMoreElements()) {
+            JarEntry entry = entries.nextElement();
+            String name = entry.getName();
+            if (entry.isDirectory() || !name.startsWith(packagePrefix)) {
+                continue;
+            }
+            this.addClassNameFromJarEntry(jarFile, entry, classNames);
+        }
+    }
+
+    private void scanPackageDirectory(Path packageRoot, String packagePath, Set<String> classNames) throws IOException {
+        if (packageRoot == null || !Files.isDirectory(packageRoot)) {
+            return;
+        }
+        try (var paths = Files.walk(packageRoot)) {
+            paths.filter(Files::isRegularFile)
+                    .forEach(classFile -> this.addClassNameFromPackageFile(packageRoot, packagePath, classFile, classNames));
+        }
+    }
+
+    private void addClassNameFromPackageFile(Path packageRoot, String packagePath, Path classFile, Set<String> classNames) {
+        String relativeName = packageRoot.relativize(classFile).toString().replace('\\', '/');
+        String className = classNameFromResourceName(packagePath + "/" + relativeName);
+        if (className == null) {
+            return;
+        }
+        classNames.add(className);
+        this.cacheClassBytes(className, classFile);
+    }
+
+    private void addClassNameFromJarEntry(JarFile jarFile, JarEntry entry, Set<String> classNames) {
+        String className = classNameFromResourceName(entry.getName());
+        if (className == null) {
+            return;
+        }
+        classNames.add(className);
+        if (this.classBytesCache.containsKey(className.replace('.', '/'))) {
+            return;
+        }
+        try (InputStream inputStream = jarFile.getInputStream(entry)) {
+            this.cacheClassBytes(className, inputStream.readAllBytes());
+        } catch (IOException ignored) {
+        }
+    }
+
+    private void cacheClassBytes(String className, Path classFile) {
+        String internalName = className.replace('.', '/');
+        if (this.classBytesCache.containsKey(internalName)) {
+            return;
+        }
+        try {
+            this.cacheClassBytes(className, Files.readAllBytes(classFile));
+        } catch (IOException ignored) {
+        }
+    }
+
+    private void cacheClassBytes(String className, byte[] bytes) {
+        if (bytes != null && bytes.length > 0) {
+            this.classBytesCache.putIfAbsent(className.replace('.', '/'), bytes);
+        }
+    }
+
+    private static String classNameFromResourceName(String resourceName) {
+        String normalized = resourceName.replace('\\', '/');
+        if (!normalized.endsWith(".class")
+                || normalized.endsWith("/package-info.class")
+                || normalized.endsWith("/module-info.class")) {
+            return null;
+        }
+        String className = normalized.substring(0, normalized.length() - ".class".length()).replace('/', '.');
+        return className.isBlank() ? null : className;
     }
 
     private boolean hasSeraMixinAnnotation(String mixinClassName, ClassLoader mixinClassLoader) {
@@ -1422,6 +1608,17 @@ public class SeraMixinLaunchPluginService implements ILaunchPluginService {
         }
         if (normalized.startsWith("L") && normalized.endsWith(";")) {
             normalized = normalized.substring(1, normalized.length() - 1);
+        }
+        return normalized.replace('/', '.').replace('\\', '.');
+    }
+
+    private static String normalizePackageName(String packageName) {
+        String normalized = packageName.trim();
+        while (normalized.endsWith("/") || normalized.endsWith("\\") || normalized.endsWith(".")) {
+            normalized = normalized.substring(0, normalized.length() - 1);
+        }
+        if (normalized.endsWith(".*")) {
+            normalized = normalized.substring(0, normalized.length() - 2);
         }
         return normalized.replace('/', '.').replace('\\', '.');
     }
