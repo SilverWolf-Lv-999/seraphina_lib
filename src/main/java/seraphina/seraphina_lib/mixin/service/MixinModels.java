@@ -47,14 +47,16 @@ final class ClassInfo {
     final ClassLoader mixinClassLoader;
     final ISeraMixin hook;
     final int priority;
+    final MixinMappingResolver mappingResolver;
 
     ClassInfo(String mixinClassName, String targetInternalName, ClassLoader mixinClassLoader,
-              ISeraMixin hook, int priority) {
+              ISeraMixin hook, int priority, MixinMappingResolver mappingResolver) {
         this.mixinClassName = mixinClassName;
         this.targetInternalName = targetInternalName;
         this.mixinClassLoader = mixinClassLoader;
         this.hook = hook;
         this.priority = priority;
+        this.mappingResolver = mappingResolver == null ? MixinMappingResolver.EMPTY : mappingResolver;
     }
 
     String key() {

@@ -117,7 +117,8 @@ final class MixinTransformerEngine {
         }
         try {
             TransformerHolder created = new TransformerHolder(this.classProvider, this.hierarchyResolver, info.mixinClassName,
-                    info.targetInternalName, loader, this.hasPrintedShadowHeader, this.currentTargetClass, info.mixinClassLoader);
+                    info.targetInternalName, loader, this.hasPrintedShadowHeader, this.currentTargetClass,
+                    info.mixinClassLoader, info.mappingResolver);
             TransformerHolder existing = this.activeTransformers.putIfAbsent(info.key(), created);
             return existing == null ? created : existing;
         } catch (Throwable throwable) {
@@ -291,6 +292,7 @@ final class MixinTransformerEngine {
                 ShadowFieldInfo shadowField = shadowFields.get(field.name);
                 if (shadowField != null) {
                     field.name = shadowField.targetFieldName;
+                    field.desc = shadowField.desc;
                     field.owner = targetInternal;
                 }
                 continue;
@@ -300,6 +302,7 @@ final class MixinTransformerEngine {
                     ShadowMethodInfo shadowMethod = shadowMethods.get(methodCall.name + methodCall.desc);
                     if (shadowMethod != null) {
                         methodCall.name = shadowMethod.targetMethodName;
+                        methodCall.desc = shadowMethod.desc;
                         if (methodCall.getOpcode() == Opcodes.INVOKESTATIC) {
                             methodCall.setOpcode(Opcodes.INVOKEVIRTUAL);
                             instructions.insertBefore(methodCall, new VarInsnNode(Opcodes.ALOAD, 0));

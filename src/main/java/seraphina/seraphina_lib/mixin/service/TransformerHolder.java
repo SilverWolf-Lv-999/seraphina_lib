@@ -39,6 +39,7 @@ final class TransformerHolder {
     final Map<String, MethodNode> rewrittenMethodCache = new HashMap<>();
     final ClassLoader loader;
     final ClassLoader mixinClassLoader;
+    final MixinMappingResolver mappingResolver;
     final ThreadLocal<Boolean> hasPrintedShadowHeader;
     final ThreadLocal<String> currentTargetClass;
     final ClassNode mixinClassNode;
@@ -46,13 +47,15 @@ final class TransformerHolder {
     TransformerHolder(MixinClassProvider classProvider, MixinHierarchyResolver hierarchyResolver,
                       String mixinClassName, String targetInternalName,
                       ClassLoader loader, ThreadLocal<Boolean> hasPrintedShadowHeader,
-                      ThreadLocal<String> currentTargetClass, ClassLoader mixinClassLoader) throws IOException {
+                      ThreadLocal<String> currentTargetClass, ClassLoader mixinClassLoader,
+                      MixinMappingResolver mappingResolver) throws IOException {
         this.classProvider = classProvider;
         this.hierarchyResolver = hierarchyResolver;
         this.mixinClassName = mixinClassName;
         this.targetInternalName = targetInternalName;
         this.loader = loader != null ? loader : classProvider.getRuntimeClassLoader();
         this.mixinClassLoader = mixinClassLoader != null ? mixinClassLoader : this.loader;
+        this.mappingResolver = mappingResolver == null ? MixinMappingResolver.EMPTY : mappingResolver;
         this.hasPrintedShadowHeader = hasPrintedShadowHeader;
         this.currentTargetClass = currentTargetClass;
         this.mixinClassNode = this.scanWithASM();
@@ -63,48 +66,60 @@ final class TransformerHolder {
         ClassNode classNode = new ClassNode();
         new ClassReader(mixinBytes).accept(classNode, ClassReader.EXPAND_FRAMES);
         String mixinInternal = this.mixinClassName.replace('.', '/');
+        boolean remap = this.mappingResolver.isEnabled() && !this.hasNoRemapping(classNode);
 
-        this.scanShadowFields(classNode);
+        this.scanShadowFields(classNode, remap);
         for (MethodNode method : classNode.methods) {
-            this.scanMethod(method, mixinInternal);
+            this.scanMethod(method, mixinInternal, remap);
         }
         return classNode;
     }
 
-    private void scanShadowFields(ClassNode classNode) {
+    private boolean hasNoRemapping(ClassNode classNode) {
+        return MixinAnnotationUtils.findAnnotation(
+                classNode.visibleAnnotations,
+                classNode.invisibleAnnotations,
+                MixinConstants.NO_REMAPPING_CLASS) != null;
+    }
+
+    private void scanShadowFields(ClassNode classNode, boolean remap) {
         for (FieldNode field : classNode.fields) {
             for (AnnotationNode annotation : MixinAnnotationUtils.annotationNodes(field.visibleAnnotations, field.invisibleAnnotations)) {
                 if (!MixinConstants.SHADOW_CLASS.equals(annotation.desc)) {
                     continue;
                 }
                 String targetFieldName = MixinAnnotationUtils.annotationStringValue(annotation, "value", field.name);
-                this.shadowFields.put(field.name, new ShadowFieldInfo(field.name, targetFieldName, field.desc));
+                if (remap) {
+                    targetFieldName = this.mappingResolver.mapFieldName(this.targetInternalName, targetFieldName);
+                }
+                String targetFieldDesc = remap ? this.mappingResolver.mapDescriptor(field.desc) : field.desc;
+                this.shadowFields.put(field.name, new ShadowFieldInfo(field.name, targetFieldName, targetFieldDesc));
                 this.ensureShadowHeader();
                 break;
             }
         }
     }
 
-    private void scanMethod(MethodNode method, String mixinInternal) {
+    private void scanMethod(MethodNode method, String mixinInternal, boolean remap) {
         ArrayList<InjectInfo> injects = new ArrayList<>();
         ArrayList<OverwriteInfo> overwrites = new ArrayList<>();
 
         for (AnnotationNode annotation : MixinAnnotationUtils.annotationNodes(method.visibleAnnotations, method.invisibleAnnotations)) {
             String desc = annotation.desc;
             if (MixinConstants.SHADOW_CLASS.equals(desc)) {
-                ShadowMethodInfo shadowMethodInfo = this.getShadowMethodInfo(method, annotation);
+                ShadowMethodInfo shadowMethodInfo = this.getShadowMethodInfo(method, annotation, remap);
                 this.shadowMethods.put(method.name + method.desc, shadowMethodInfo);
                 this.ensureShadowHeader();
             } else if (MixinConstants.RETURN_FIELD_CLASS.equals(desc)) {
-                this.addReturnFieldPoints(method, annotation, mixinInternal);
+                this.addReturnFieldPoints(method, annotation, mixinInternal, remap);
             } else if (MixinConstants.INJECT_CLASS.equals(desc)) {
-                injects.addAll(this.readInjectPoints(annotation, InsertPosition.HEAD));
+                injects.addAll(this.readInjectPoints(annotation, InsertPosition.HEAD, remap));
             } else if (MixinConstants.ASM_CLASS.equals(desc)) {
                 this.reportUnsupportedASMHandler(method);
             } else if (MixinConstants.REDIRECT_CLASS.equals(desc)) {
-                this.redirectPoints.addAll(this.readRedirectPoints(method, annotation));
+                this.redirectPoints.addAll(this.readRedirectPoints(method, annotation, remap));
             } else if (MixinConstants.OVERWRITE_CLASS.equals(desc)) {
-                overwrites.addAll(this.readOverwritePoints(annotation));
+                overwrites.addAll(this.readOverwritePoints(annotation, remap));
             }
         }
 
@@ -123,23 +138,29 @@ final class TransformerHolder {
         this.rewrittenMethodCache.put(method.name + method.desc, clonedMethod);
     }
 
-    private List<InjectInfo> readInjectPoints(AnnotationNode annotation, InsertPosition defaultPosition) {
+    private List<InjectInfo> readInjectPoints(AnnotationNode annotation, InsertPosition defaultPosition, boolean remap) {
         List<String> methodNames = MixinAnnotationUtils.annotationStringListValue(annotation, "methodName");
         String methodDesc = MixinAnnotationUtils.annotationStringValue(annotation, "desc", "");
         InsertPosition position = MixinAnnotationUtils.annotationEnumValue(annotation, "at", defaultPosition);
         ArrayList<InjectInfo> points = new ArrayList<>();
         for (String methodName : methodNames) {
-            points.add(new InjectInfo(methodName, methodDesc, position));
+            MappedMethod mapped = remap
+                    ? this.mappingResolver.mapMethod(this.targetInternalName, methodName, methodDesc)
+                    : new MappedMethod(methodName, methodDesc);
+            points.add(new InjectInfo(mapped.name(), mapped.desc(), position));
         }
         return points;
     }
 
-    private List<OverwriteInfo> readOverwritePoints(AnnotationNode annotation) {
+    private List<OverwriteInfo> readOverwritePoints(AnnotationNode annotation, boolean remap) {
         List<String> methodNames = MixinAnnotationUtils.annotationStringListValue(annotation, "methodName");
         String methodDesc = MixinAnnotationUtils.annotationStringValue(annotation, "desc", "");
         ArrayList<OverwriteInfo> points = new ArrayList<>();
         for (String methodName : methodNames) {
-            points.add(new OverwriteInfo(methodName, methodDesc));
+            MappedMethod mapped = remap
+                    ? this.mappingResolver.mapMethod(this.targetInternalName, methodName, methodDesc)
+                    : new MappedMethod(methodName, methodDesc);
+            points.add(new OverwriteInfo(mapped.name(), mapped.desc()));
         }
         return points;
     }
@@ -149,20 +170,23 @@ final class TransformerHolder {
                 + this.mixinClassName + "." + method.name + method.desc);
     }
 
-    private List<RedirectPoint> readRedirectPoints(MethodNode method, AnnotationNode annotation) {
+    private List<RedirectPoint> readRedirectPoints(MethodNode method, AnnotationNode annotation, boolean remap) {
         List<String> methodNames = MixinAnnotationUtils.annotationStringListValue(annotation, "methodName");
         String methodDesc = MixinAnnotationUtils.annotationStringValue(annotation, "methodDesc", "");
         List<String> targetMethods = MixinAnnotationUtils.annotationStringListValue(annotation, "targetMethod");
         String targetMethodDesc = MixinAnnotationUtils.annotationStringValue(annotation, "targetMethodDesc", "");
-        List<TargetCall> targetCalls = this.getTargetCalls(targetMethods, targetMethodDesc);
+        List<TargetCall> targetCalls = this.getTargetCalls(targetMethods, targetMethodDesc, remap);
         ArrayList<RedirectPoint> points = new ArrayList<>();
         for (String methodName : methodNames) {
-            points.add(new RedirectPoint(methodName, methodDesc, this.mixinClassName, method.name, method.desc, targetCalls));
+            MappedMethod mapped = remap
+                    ? this.mappingResolver.mapMethod(this.targetInternalName, methodName, methodDesc)
+                    : new MappedMethod(methodName, methodDesc);
+            points.add(new RedirectPoint(mapped.name(), mapped.desc(), this.mixinClassName, method.name, method.desc, targetCalls));
         }
         return points;
     }
 
-    private List<TargetCall> getTargetCalls(List<String> targetMethods, String targetMethodDesc) {
+    private List<TargetCall> getTargetCalls(List<String> targetMethods, String targetMethodDesc, boolean remap) {
         ArrayList<TargetCall> targetCalls = new ArrayList<>();
         for (String targetMethod : targetMethods) {
             int lastSlash = targetMethod.lastIndexOf('/');
@@ -174,17 +198,30 @@ final class TransformerHolder {
             }
             String owner = targetMethod.substring(0, lastSlash).replace('.', '/');
             String name = targetMethod.substring(lastSlash + 1);
-            targetCalls.add(new TargetCall(owner, name, targetMethodDesc));
+            String desc = targetMethodDesc;
+            if (remap) {
+                MappedMethod mapped = this.mappingResolver.mapMethod(owner, name, targetMethodDesc);
+                owner = this.mappingResolver.mapClassName(owner);
+                name = mapped.name();
+                desc = mapped.desc();
+            }
+            targetCalls.add(new TargetCall(owner, name, desc));
         }
         return targetCalls;
     }
 
-    private ShadowMethodInfo getShadowMethodInfo(MethodNode method, AnnotationNode annotation) {
+    private ShadowMethodInfo getShadowMethodInfo(MethodNode method, AnnotationNode annotation, boolean remap) {
         String targetMethodName = MixinAnnotationUtils.annotationStringValue(annotation, "value", method.name);
-        return new ShadowMethodInfo(method.name, targetMethodName, method.desc);
+        String targetMethodDesc = method.desc;
+        if (remap) {
+            MappedMethod mapped = this.mappingResolver.mapMethod(this.targetInternalName, targetMethodName, method.desc);
+            targetMethodName = mapped.name();
+            targetMethodDesc = mapped.desc();
+        }
+        return new ShadowMethodInfo(method.name, targetMethodName, targetMethodDesc);
     }
 
-    private void addReturnFieldPoints(MethodNode method, AnnotationNode annotation, String mixinInternal) {
+    private void addReturnFieldPoints(MethodNode method, AnnotationNode annotation, String mixinInternal, boolean remap) {
         if ((method.access & Opcodes.ACC_STATIC) == 0 || (method.access & Opcodes.ACC_PUBLIC) == 0) {
             System.err.println("[SeraMixin] @ReturnField handler must be public static: "
                     + this.mixinClassName + "." + method.name + method.desc);
@@ -222,8 +259,12 @@ final class TransformerHolder {
         if (fieldDesc == null || fieldDesc.isEmpty()) {
             fieldDesc = args[isStatic ? 0 : 1].getDescriptor();
         }
+        if (remap) {
+            fieldDesc = this.mappingResolver.mapDescriptor(fieldDesc);
+        }
 
-        String returnCastType = this.resolveReturnCastType(fieldDesc, method.desc, isStatic);
+        String handlerDescForCheck = remap ? this.mappingResolver.mapDescriptor(method.desc) : method.desc;
+        String returnCastType = this.resolveReturnCastType(fieldDesc, handlerDescForCheck, isStatic);
         if (ReturnFieldPoint.INCOMPATIBLE_CAST.equals(returnCastType)) {
             System.err.println("[SeraMixin] @ReturnField handler desc mismatch for "
                     + this.targetInternalName + " fields " + fields + ": fieldDesc=" + fieldDesc
@@ -232,9 +273,10 @@ final class TransformerHolder {
         }
 
         for (String fieldName : new LinkedHashSet<>(fields)) {
+            String targetFieldName = remap ? this.mappingResolver.mapFieldName(this.targetInternalName, fieldName) : fieldName;
             this.returnFieldPoints.add(new ReturnFieldPoint(
                     this.targetInternalName,
-                    fieldName,
+                    targetFieldName,
                     fieldDesc,
                     isStatic,
                     mixinInternal,
@@ -250,7 +292,7 @@ final class TransformerHolder {
         if (argType.getSort() != Type.OBJECT) {
             return false;
         }
-        String argInternal = argType.getInternalName();
+        String argInternal = this.mappingResolver.mapClassName(argType.getInternalName());
         return "java/lang/Object".equals(argInternal)
                 || this.targetInternalName.equals(argInternal)
                 || this.hierarchyResolver.isSubclassASM(this.targetInternalName, argInternal, this.loader);
@@ -296,6 +338,7 @@ final class TransformerHolder {
                 }
                 fieldNode.owner = this.targetInternalName;
                 fieldNode.name = shadowField.targetFieldName;
+                fieldNode.desc = shadowField.desc;
                 int opcode = fieldNode.getOpcode();
                 if (opcode == Opcodes.GETSTATIC) {
                     fieldNode.setOpcode(Opcodes.GETFIELD);
@@ -330,6 +373,7 @@ final class TransformerHolder {
 
             methodNode.owner = this.targetInternalName;
             methodNode.name = shadowMethod.targetMethodName;
+            methodNode.desc = shadowMethod.desc;
             if (methodNode.getOpcode() == Opcodes.INVOKESTATIC) {
                 methodNode.setOpcode(Opcodes.INVOKEVIRTUAL);
                 instructions.insertBefore(methodNode, new VarInsnNode(Opcodes.ALOAD, 0));

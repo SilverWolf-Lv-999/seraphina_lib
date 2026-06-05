@@ -38,10 +38,12 @@ public class SeraMixinLaunchPluginService implements ILaunchPluginService {
     private final MixinHierarchyResolver hierarchyResolver;
     private final MixinTransformerEngine transformerEngine;
     private final MixinServiceDiscovery serviceDiscovery;
+    private final MixinMappingManager mappingManager;
 
     public SeraMixinLaunchPluginService() {
         this.classProvider = new MixinClassProvider(this.getClass());
         this.hierarchyResolver = new MixinHierarchyResolver(this.registeredMixins, this.classProvider);
+        this.mappingManager = new MixinMappingManager();
         this.transformerEngine = new MixinTransformerEngine(
                 this.registeredMixins,
                 this.classProvider,
@@ -241,6 +243,10 @@ public class SeraMixinLaunchPluginService implements ILaunchPluginService {
         return this.classProvider.resolveClass(className, preferredLoader);
     }
 
+    void prepareProviderMapping(ISeraMixin provider) {
+        this.mappingManager.prepare(provider);
+    }
+
     private void ensureMixinServicesLoaded() {
         this.serviceDiscovery.ensureLoaded();
     }
@@ -324,9 +330,10 @@ public class SeraMixinLaunchPluginService implements ILaunchPluginService {
 
     private void register(String mixinClassName, String targetClassName, ClassLoader mixinClassLoader, ISeraMixin hook, int priority) {
         String normalizedMixin = MixinNameUtils.normalizeClassName(mixinClassName);
-        String targetInternal = MixinNameUtils.toInternalName(targetClassName);
+        MixinMappingResolver mappingResolver = this.mappingManager.mappingFor(hook);
+        String targetInternal = mappingResolver.mapClassName(MixinNameUtils.toInternalName(targetClassName));
         ClassLoader loader = mixinClassLoader != null ? mixinClassLoader : this.getRuntimeClassLoader();
-        ClassInfo info = new ClassInfo(normalizedMixin, targetInternal, loader, hook, priority);
+        ClassInfo info = new ClassInfo(normalizedMixin, targetInternal, loader, hook, priority, mappingResolver);
         this.registeredMixins.compute(targetInternal, (target, oldValue) -> {
             ArrayList<ClassInfo> next = oldValue == null ? new ArrayList<>() : new ArrayList<>(oldValue);
             next.removeIf(existing -> existing.mixinClassName.equals(info.mixinClassName));

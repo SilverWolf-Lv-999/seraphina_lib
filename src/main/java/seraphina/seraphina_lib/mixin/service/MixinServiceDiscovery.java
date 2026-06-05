@@ -108,6 +108,8 @@ final class MixinServiceDiscovery {
     }
 
     private void registerProvider(ISeraMixin provider) {
+        this.service.prepareProviderMapping(provider);
+
         try {
             provider.onLoad();
         } catch (Throwable throwable) {

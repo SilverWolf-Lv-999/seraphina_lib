@@ -3,6 +3,7 @@ package seraphina.seraphina_lib.mixin.service;
 import org.objectweb.asm.Type;
 import seraphina.seraphina_lib.mixin.annotation.ASM;
 import seraphina.seraphina_lib.mixin.annotation.Inject;
+import seraphina.seraphina_lib.mixin.annotation.NoReMapping;
 import seraphina.seraphina_lib.mixin.annotation.Overwrite;
 import seraphina.seraphina_lib.mixin.annotation.Redirect;
 import seraphina.seraphina_lib.mixin.annotation.ReturnField;
@@ -20,6 +21,7 @@ final class MixinConstants {
     static final String OVERWRITE_CLASS = Type.getDescriptor(Overwrite.class);
     static final String RETURN_FIELD_CLASS = Type.getDescriptor(ReturnField.class);
     static final String SERA_MIXIN_CLASS = Type.getDescriptor(SeraMixin.class);
+    static final String NO_REMAPPING_CLASS = Type.getDescriptor(NoReMapping.class);
     static final String CALL_BACK_INFO = Type.getInternalName(CallBackInfo.class);
     static final String NO_PARENT_TARGET = "<NO_PARENT>";
 
