@@ -3,3 +3,5 @@
 /run
 /run-data
 /.gradle
+/SeraMixin/.gradle
+/SeraMixin/.run
