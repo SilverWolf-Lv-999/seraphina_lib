@@ -197,8 +197,8 @@ public final class Example {
 ```java
 import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.resources.ResourceLocation;
-import seraphina.seraphina_lib.client.GIFImage;
-import seraphina.seraphina_lib.client.SvgImage;
+import seraphina.seraphina_lib.client.gif.GIFImage;
+import seraphina.seraphina_lib.client.svg.SvgImage;
 
 public final class ExampleScreenImages {
     private final SvgImage icon = new SvgImage(
