@@ -13,6 +13,8 @@ import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.client.renderer.GameRenderer;
 import net.minecraft.client.renderer.texture.DynamicTexture;
 import net.minecraft.resources.ResourceLocation;
+import net.minecraftforge.api.distmarker.Dist;
+import net.minecraftforge.api.distmarker.OnlyIn;
 import org.joml.Matrix4f;
 import org.w3c.dom.NamedNodeMap;
 import org.w3c.dom.Node;
@@ -38,6 +40,7 @@ import java.util.List;
  * full-canvas {@link BufferedImage} before uploading the frames to Minecraft textures.
  * </p>
  */
+@OnlyIn(Dist.CLIENT)
 public class GIFImage {
     private static final int DEFAULT_FRAME_DELAY_MILLIS = 100;
     private static final int MIN_FRAME_DELAY_MILLIS = 20;

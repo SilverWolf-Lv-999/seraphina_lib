@@ -13,6 +13,8 @@ import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.client.renderer.GameRenderer;
 import net.minecraft.client.renderer.texture.DynamicTexture;
 import net.minecraft.resources.ResourceLocation;
+import net.minecraftforge.api.distmarker.Dist;
+import net.minecraftforge.api.distmarker.OnlyIn;
 import org.joml.Matrix4f;
 import org.w3c.dom.Document;
 import org.w3c.dom.Element;
@@ -39,6 +41,7 @@ import java.util.regex.Pattern;
  * @author Seraphina
  * @version 1.0
  * */
+@OnlyIn(Dist.CLIENT)
 public class SvgImage {
     private static final Pattern STYLE_CLASS_PATTERN = Pattern.compile("\\.([a-zA-Z0-9_-]+)\\s*\\{([^}]*)}", Pattern.DOTALL);
     private static final Pattern NUMBER_PATTERN = Pattern.compile("[-+]?(?:\\d+\\.\\d*|\\.\\d+|\\d+)(?:[eE][-+]?\\d+)?");
