@@ -4,7 +4,6 @@ import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.ClassWriter;
 import org.objectweb.asm.commons.ClassRemapper;
 import org.objectweb.asm.commons.SimpleRemapper;
-import seraphina.seraphina_lib.LIBSource;
 import seraphina.seraphina_lib.logger.Logger;
 import seraphina.seraphina_lib.logger.LoggerFactory;
 
@@ -14,9 +13,11 @@ import java.lang.invoke.MethodHandles;
 import java.lang.invoke.MethodType;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
-import java.lang.reflect.Method;
 import java.security.ProtectionDomain;
-import java.util.*;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
 
 public class ClassUtils {
 	static ClassUtils Instance = null;
@@ -193,24 +194,6 @@ public class ClassUtils {
 
 	public Class<?> defineHiddenPackageClass(String name, Class<?> lookup) {
 		return defineHiddenPackageClass(name, lookup.getClassLoader(), lookup, true, ClassOption.STRONG);
-	}
-
-	public void openAllRequiredModules() {
-        Module currentModule = LIBSource.class.getModule();
-		ModuleLayer bootLayer = ModuleLayer.boot();
-		for (String[] modulePackage : new String[][]{{"java.base", "java.lang.invoke"}, {"java.base", "jdk.internal.misc"}, {"java.base", "jdk.internal.loader"}, {"java.base", "jdk.internal.module"}, {"jdk.attach", "sun.tools.attach"}, {"jdk.attach", "com.sun.tools.attach"}, {"jdk.attach", "com.sun.tools.attach.spi"}, {"java.instrument", "sun.instrument"}, {"java.base", "java.lang.reflect"}, {"java.base", "java.lang"}}) {
-			String moduleName = modulePackage[0];
-			String packageName = modulePackage[1];
-			Optional<Module> optModule = bootLayer.findModule(moduleName);
-			if (!optModule.isPresent()) continue;
-			Module module = optModule.get();
-			try {
-				MethodHandle implAddOpens = getLookup().findVirtual(Module.class, "implAddOpens", MethodType.methodType(Void.TYPE, String.class, Module.class));
-				implAddOpens.invoke(module, packageName, currentModule);
-			} catch (Throwable e) {
-				LOGGER.warn("Failed to open {} / {} using reflection", moduleName, packageName);
-			}
-		}
 	}
 
 	public Class<?> findClass(String name) {
