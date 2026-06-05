@@ -89,6 +89,12 @@ final class MixinMappingManager {
             stream = providerClass.getResourceAsStream('/' + resourcePath);
         }
         if (stream == null) {
+            ClassLoader libClassLoader = ISeraMixin.class.getClassLoader();
+            stream = libClassLoader == null
+                    ? ClassLoader.getSystemResourceAsStream(resourcePath)
+                    : libClassLoader.getResourceAsStream(resourcePath);
+        }
+        if (stream == null) {
             return null;
         }
         try (InputStream input = stream) {

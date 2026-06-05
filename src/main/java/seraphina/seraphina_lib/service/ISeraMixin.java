@@ -10,17 +10,16 @@ public interface ISeraMixin {
     String getMixinPath();
 
     /**
-     * Returns the mapping resource path inside this provider jar.
-     * Example: assets/example/mappings/mapping.txt.
+     * Returns the mapping resource path inside the jar.
      * Empty means this provider does not use SeraMixin remapping.
      */
     default String getMappingPath() {
-        return "";
+        return "assets/seraphina_lib/srg/minecraft.srg";
     }
 
     /**
      * Returns the mapping type used both as the output file extension and parser hint.
-     * Returning "srg" with mapping.txt writes <gamepath>/seraphina_mixin/srg/mapping.srg.
+     * Returning "srg" with minecraft.srg writes <gamepath>/seraphina_mixin/srg/minecraft.srg.
      */
     default String getMappingType() {
         return "srg";
