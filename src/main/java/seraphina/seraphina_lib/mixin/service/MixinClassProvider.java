@@ -127,12 +127,17 @@ final class MixinClassProvider {
 
     List<ClassLoader> classLoaderCandidates(ClassLoader preferred) {
         LinkedHashSet<ClassLoader> candidates = new LinkedHashSet<>();
-        candidates.add(preferred);
-        candidates.add(Thread.currentThread().getContextClassLoader());
-        candidates.add(this.ownerClass.getClassLoader());
-        candidates.add(ClassLoader.getSystemClassLoader());
-        candidates.remove(null);
+        includeClassLoader(candidates, preferred);
+        includeClassLoader(candidates, Thread.currentThread().getContextClassLoader());
+        includeClassLoader(candidates, this.ownerClass.getClassLoader());
+        includeClassLoader(candidates, ClassLoader.getSystemClassLoader());
         return new ArrayList<>(candidates);
+    }
+
+    private static void includeClassLoader(Set<ClassLoader> candidates, ClassLoader classLoader) {
+        if (classLoader != null) {
+            candidates.add(classLoader);
+        }
     }
 
     Class<?> resolveClass(String className, ClassLoader preferredLoader) throws ClassNotFoundException {

@@ -18,6 +18,10 @@ final class SvgRasterizer {
     private SvgRasterizer() {
     }
 
+    /**
+     * Renders SVG content with bounded supersampling, then prepares transparent
+     * pixels for texture filtering by copying nearby visible colors into them.
+     */
     static BufferedImage rasterize(Document document, int width, int height, float timeSeconds, SvgAnimationTimeline timeline) {
         timeline.apply(timeSeconds);
 
@@ -77,32 +81,37 @@ final class SvgRasterizer {
             int sourceY = y * scale;
             for (int x = 0; x < width; x++) {
                 int sourceX = x * scale;
-                long alphaSum = 0L;
-                long redSum = 0L;
-                long greenSum = 0L;
-                long blueSum = 0L;
-
-                for (int sy = 0; sy < scale; sy++) {
-                    int sourceIndex = (sourceY + sy) * sourceStride + sourceX;
-                    for (int sx = 0; sx < scale; sx++) {
-                        int argb = sourcePixels[sourceIndex + sx];
-                        int alpha = (argb >>> 24) & 0xFF;
-                        alphaSum += alpha;
-                        redSum += (long) ((argb >>> 16) & 0xFF) * alpha;
-                        greenSum += (long) ((argb >>> 8) & 0xFF) * alpha;
-                        blueSum += (long) (argb & 0xFF) * alpha;
-                    }
-                }
-
-                int alpha = (int) ((alphaSum + sampleCount / 2L) / sampleCount);
-                int red = alphaSum == 0L ? 0 : (int) ((redSum + alphaSum / 2L) / alphaSum);
-                int green = alphaSum == 0L ? 0 : (int) ((greenSum + alphaSum / 2L) / alphaSum);
-                int blue = alphaSum == 0L ? 0 : (int) ((blueSum + alphaSum / 2L) / alphaSum);
-                targetPixels[y * width + x] = alpha << 24 | red << 16 | green << 8 | blue;
+                targetPixels[y * width + x] = downsamplePixel(sourcePixels, sourceStride, sourceX, sourceY, scale, sampleCount);
             }
         }
 
         return target;
+    }
+
+    private static int downsamplePixel(int[] sourcePixels, int sourceStride, int sourceX, int sourceY,
+                                       int scale, int sampleCount) {
+        long alphaSum = 0L;
+        long redSum = 0L;
+        long greenSum = 0L;
+        long blueSum = 0L;
+
+        for (int sy = 0; sy < scale; sy++) {
+            int sourceIndex = (sourceY + sy) * sourceStride + sourceX;
+            for (int sx = 0; sx < scale; sx++) {
+                int argb = sourcePixels[sourceIndex + sx];
+                int alpha = alpha(argb);
+                alphaSum += alpha;
+                redSum += (long) red(argb) * alpha;
+                greenSum += (long) green(argb) * alpha;
+                blueSum += (long) blue(argb) * alpha;
+            }
+        }
+
+        int alpha = (int) ((alphaSum + sampleCount / 2L) / sampleCount);
+        int red = alphaSum == 0L ? 0 : (int) ((redSum + alphaSum / 2L) / alphaSum);
+        int green = alphaSum == 0L ? 0 : (int) ((greenSum + alphaSum / 2L) / alphaSum);
+        int blue = alphaSum == 0L ? 0 : (int) ((blueSum + alphaSum / 2L) / alphaSum);
+        return alpha << 24 | red << 16 | green << 8 | blue;
     }
 
     private static void bleedTransparentPixelColors(BufferedImage image) {
@@ -113,60 +122,7 @@ final class SvgRasterizer {
 
         for (int pass = 0; pass < TRANSPARENT_COLOR_BLEED_PASSES; pass++) {
             int[] next = current.clone();
-            boolean changed = false;
-
-            for (int y = 0; y < height; y++) {
-                for (int x = 0; x < width; x++) {
-                    int index = y * width + x;
-                    if (((current[index] >>> 24) & 0xFF) != 0) {
-                        continue;
-                    }
-
-                    long redSum = 0L;
-                    long greenSum = 0L;
-                    long blueSum = 0L;
-                    long weightSum = 0L;
-
-                    for (int offsetY = -1; offsetY <= 1; offsetY++) {
-                        int neighborY = y + offsetY;
-                        if (neighborY < 0 || neighborY >= height) {
-                            continue;
-                        }
-
-                        for (int offsetX = -1; offsetX <= 1; offsetX++) {
-                            if (offsetX == 0 && offsetY == 0) {
-                                continue;
-                            }
-
-                            int neighborX = x + offsetX;
-                            if (neighborX < 0 || neighborX >= width) {
-                                continue;
-                            }
-
-                            int neighbor = current[neighborY * width + neighborX];
-                            int neighborAlpha = (neighbor >>> 24) & 0xFF;
-                            int neighborColor = neighbor & 0x00FFFFFF;
-                            if (neighborAlpha == 0 && neighborColor == 0) {
-                                continue;
-                            }
-
-                            int weight = Math.max(1, neighborAlpha);
-                            redSum += (long) ((neighbor >>> 16) & 0xFF) * weight;
-                            greenSum += (long) ((neighbor >>> 8) & 0xFF) * weight;
-                            blueSum += (long) (neighbor & 0xFF) * weight;
-                            weightSum += weight;
-                        }
-                    }
-
-                    if (weightSum > 0L) {
-                        int red = (int) ((redSum + weightSum / 2L) / weightSum);
-                        int green = (int) ((greenSum + weightSum / 2L) / weightSum);
-                        int blue = (int) ((blueSum + weightSum / 2L) / weightSum);
-                        next[index] = red << 16 | green << 8 | blue;
-                        changed = true;
-                    }
-                }
-            }
+            boolean changed = bleedTransparentPixelPass(current, next, width, height);
 
             current = next;
             if (!changed) {
@@ -175,5 +131,101 @@ final class SvgRasterizer {
         }
 
         System.arraycopy(current, 0, pixels, 0, pixels.length);
+    }
+
+    private static boolean bleedTransparentPixelPass(int[] current, int[] next, int width, int height) {
+        boolean changed = false;
+        for (int y = 0; y < height; y++) {
+            for (int x = 0; x < width; x++) {
+                changed |= bleedTransparentPixel(current, next, width, height, x, y);
+            }
+        }
+        return changed;
+    }
+
+    private static boolean bleedTransparentPixel(int[] current, int[] next, int width, int height, int x, int y) {
+        int index = y * width + x;
+        if (alpha(current[index]) != 0) {
+            return false;
+        }
+
+        ColorSample sample = sampleNeighborColors(current, width, height, x, y);
+        if (sample.weightSum == 0L) {
+            return false;
+        }
+
+        int red = (int) ((sample.redSum + sample.weightSum / 2L) / sample.weightSum);
+        int green = (int) ((sample.greenSum + sample.weightSum / 2L) / sample.weightSum);
+        int blue = (int) ((sample.blueSum + sample.weightSum / 2L) / sample.weightSum);
+        next[index] = red << 16 | green << 8 | blue;
+        return true;
+    }
+
+    private static ColorSample sampleNeighborColors(int[] current, int width, int height, int x, int y) {
+        ColorSample sample = new ColorSample();
+        for (int offsetY = -1; offsetY <= 1; offsetY++) {
+            int neighborY = y + offsetY;
+            if (!isInside(neighborY, height)) {
+                continue;
+            }
+            sampleNeighborRow(current, width, x, offsetY, neighborY, sample);
+        }
+        return sample;
+    }
+
+    private static void sampleNeighborRow(int[] current, int width, int x, int offsetY,
+                                          int neighborY, ColorSample sample) {
+        for (int offsetX = -1; offsetX <= 1; offsetX++) {
+            if (offsetX == 0 && offsetY == 0) {
+                continue;
+            }
+
+            int neighborX = x + offsetX;
+            if (!isInside(neighborX, width)) {
+                continue;
+            }
+            sample.add(current[neighborY * width + neighborX]);
+        }
+    }
+
+    private static boolean isInside(int value, int limit) {
+        return value >= 0 && value < limit;
+    }
+
+    private static int alpha(int argb) {
+        return (argb >>> 24) & 0xFF;
+    }
+
+    private static int red(int argb) {
+        return (argb >>> 16) & 0xFF;
+    }
+
+    private static int green(int argb) {
+        return (argb >>> 8) & 0xFF;
+    }
+
+    private static int blue(int argb) {
+        return argb & 0xFF;
+    }
+
+    private static final class ColorSample {
+        private long redSum;
+        private long greenSum;
+        private long blueSum;
+        private long weightSum;
+
+        private void add(int argb) {
+            int neighborAlpha = alpha(argb);
+            int neighborColor = argb & 0x00FFFFFF;
+            if (neighborAlpha == 0 && neighborColor == 0) {
+                return;
+            }
+
+            int weight = Math.max(1, neighborAlpha);
+            this.redSum += (long) red(argb) * weight;
+            this.greenSum += (long) green(argb) * weight;
+            this.blueSum += (long) blue(argb) * weight;
+            this.weightSum += weight;
+        }
     }
 }

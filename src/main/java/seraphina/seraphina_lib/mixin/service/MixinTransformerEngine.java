@@ -17,6 +17,7 @@ import org.objectweb.asm.tree.MethodInsnNode;
 import org.objectweb.asm.tree.MethodNode;
 import org.objectweb.asm.tree.TypeInsnNode;
 import org.objectweb.asm.tree.VarInsnNode;
+import seraphina.seraphina_lib.mixin.util.InsertPosition;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -28,6 +29,11 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
 
+/**
+ * Applies pre-scanned mixin metadata to ASM class nodes during launch-time
+ * transformation. The engine keeps each transformation step isolated so failed
+ * mixins can be reported without corrupting the target class.
+ */
 final class MixinTransformerEngine {
     private final Map<String, List<ClassInfo>> registeredMixins;
     private final Map<String, TransformerHolder> activeTransformers = new ConcurrentHashMap<>();
@@ -36,6 +42,7 @@ final class MixinTransformerEngine {
     private final ThreadLocal<Boolean> isSubclassMode;
     private final ThreadLocal<Boolean> hasPrintedShadowHeader;
     private final ThreadLocal<String> currentTargetClass;
+    private final TransformerHolder.Services transformerHolderServices;
     private volatile boolean returnFieldHoldersInitialized;
 
     MixinTransformerEngine(Map<String, List<ClassInfo>> registeredMixins,
@@ -50,29 +57,44 @@ final class MixinTransformerEngine {
         this.isSubclassMode = isSubclassMode;
         this.hasPrintedShadowHeader = hasPrintedShadowHeader;
         this.currentTargetClass = currentTargetClass;
+        this.transformerHolderServices = new TransformerHolder.Services(
+                classProvider,
+                hierarchyResolver,
+                hasPrintedShadowHeader,
+                currentTargetClass);
     }
 
     boolean applyClassNodeTransform(ClassNode classNode, String internalName, ClassLoader loader) {
-        boolean changed = false;
         List<ClassInfo> directInfos = this.registeredMixins.get(internalName);
-        if (directInfos != null && !directInfos.isEmpty()) {
+        boolean changed;
+        if (hasClassInfos(directInfos)) {
             this.isSubclassMode.set(false);
-            changed |= this.applyMixins(classNode, directInfos, loader, internalName, false);
+            changed = this.applyMixins(classNode, directInfos, loader, internalName);
         } else {
-            String parentTarget = this.hierarchyResolver.findParentTarget(internalName, classNode, loader);
-            if (parentTarget != null) {
-                List<ClassInfo> parentInfos = this.registeredMixins.get(parentTarget);
-                if (parentInfos != null && !parentInfos.isEmpty()) {
-                    this.isSubclassMode.set(true);
-                    changed |= this.applyMixins(classNode, parentInfos, loader, internalName, true);
-                }
-            }
+            changed = this.applyParentMixins(classNode, internalName, loader);
         }
 
         if (this.applyReturnFields(classNode, loader, this.collectReturnFieldPoints(loader))) {
             changed = true;
         }
         return changed;
+    }
+
+    private boolean applyParentMixins(ClassNode classNode, String internalName, ClassLoader loader) {
+        String parentTarget = this.hierarchyResolver.findParentTarget(internalName, classNode, loader);
+        if (parentTarget == null) {
+            return false;
+        }
+        List<ClassInfo> parentInfos = this.registeredMixins.get(parentTarget);
+        if (!hasClassInfos(parentInfos)) {
+            return false;
+        }
+        this.isSubclassMode.set(true);
+        return this.applyMixins(classNode, parentInfos, loader, internalName);
+    }
+
+    private static boolean hasClassInfos(List<ClassInfo> infos) {
+        return infos != null && !infos.isEmpty();
     }
 
     String[] getReturnFieldTargets(ClassLoader loader) {
@@ -93,7 +115,7 @@ final class MixinTransformerEngine {
         this.returnFieldHoldersInitialized = false;
     }
 
-    private boolean applyMixins(ClassNode classNode, List<ClassInfo> infos, ClassLoader loader, String actualClassName, boolean isSubclass) {
+    private boolean applyMixins(ClassNode classNode, List<ClassInfo> infos, ClassLoader loader, String actualClassName) {
         boolean changed = false;
         for (ClassInfo info : infos) {
             try {
@@ -101,7 +123,7 @@ final class MixinTransformerEngine {
                 if (info.hook != null && !info.hook.shouldApplyMixin(classNode, holder.mixinClassNode)) {
                     continue;
                 }
-                changed |= this.applyTransform(classNode, holder, loader, actualClassName, isSubclass);
+                changed |= this.applyTransform(classNode, holder, loader, actualClassName);
             } catch (Throwable throwable) {
                 System.err.println("[SeraMixin] Failed to apply " + info.mixinClassName + " to " + actualClassName + ": " + throwable.getMessage());
                 throwable.printStackTrace(System.err);
@@ -116,9 +138,7 @@ final class MixinTransformerEngine {
             return holder;
         }
         try {
-            TransformerHolder created = new TransformerHolder(this.classProvider, this.hierarchyResolver, info.mixinClassName,
-                    info.targetInternalName, loader, this.hasPrintedShadowHeader, this.currentTargetClass,
-                    info.mixinClassLoader, info.mappingResolver);
+            TransformerHolder created = new TransformerHolder(this.transformerHolderServices, info, loader);
             TransformerHolder existing = this.activeTransformers.putIfAbsent(info.key(), created);
             return existing == null ? created : existing;
         } catch (Throwable throwable) {
@@ -163,121 +183,146 @@ final class MixinTransformerEngine {
         return result;
     }
 
-    private boolean applyTransform(ClassNode classNode, TransformerHolder holder, ClassLoader loader, String actualClassName, boolean isSubclass) throws Exception {
-        boolean anyMatched = false;
+    /**
+     * Applies overwrite, inject, and redirect phases in a fixed order. Lambdas
+     * and copied handlers are staged first, then appended after each phase so
+     * method iteration does not observe partially-added methods.
+     */
+    private boolean applyTransform(ClassNode classNode, TransformerHolder holder, ClassLoader loader, String actualClassName) throws Exception {
         String mixinInternal = holder.mixinClassName.replace('.', '/');
         String targetInternal = holder.targetInternalName;
         ArrayList<MethodNode> lambdaMethodsToAdd = new ArrayList<>();
         ArrayList<MethodNode> injectHandlerMethodsToAdd = new ArrayList<>();
-        HashMap<String, InjectHandlerCall> injectHandlerCalls = new HashMap<>();
-        boolean hasPrintedMethodHeader = false;
+        InjectionState injectionState = new InjectionState(injectHandlerMethodsToAdd);
 
+        boolean anyMatched = this.applyOverwriteTransforms(classNode, holder, targetInternal, mixinInternal, lambdaMethodsToAdd);
+        appendPendingMethods(classNode, lambdaMethodsToAdd);
+        anyMatched |= this.applyInjectTransforms(classNode, holder, loader, actualClassName, injectionState);
+        appendPendingMethods(classNode, injectHandlerMethodsToAdd);
+        anyMatched |= this.applyRedirectTransforms(classNode, holder, mixinInternal);
+        return anyMatched;
+    }
+
+    private boolean applyOverwriteTransforms(ClassNode classNode, TransformerHolder holder, String targetInternal,
+                                             String mixinInternal, List<MethodNode> lambdaMethodsToAdd) throws IOException, NoSuchMethodException {
+        boolean changed = false;
+        MixinCopyContext copyContext = new MixinCopyContext(classNode, holder, targetInternal, mixinInternal, lambdaMethodsToAdd);
         for (MethodNode method : classNode.methods) {
             for (OverwritePoint point : holder.overwritePoints) {
                 if (!point.matches(method.name, method.desc)) {
                     continue;
                 }
-                if (!hasPrintedMethodHeader && !isSubclass) {
-                    hasPrintedMethodHeader = true;
-                }
-                this.applyOverwrite(method, point, holder, targetInternal, mixinInternal, classNode, lambdaMethodsToAdd);
-                anyMatched = true;
+                this.applyOverwrite(method, point, copyContext);
+                changed = true;
             }
         }
-        if (!lambdaMethodsToAdd.isEmpty()) {
-            classNode.methods.addAll(lambdaMethodsToAdd);
-        }
+        return changed;
+    }
 
+    private boolean applyInjectTransforms(ClassNode classNode, TransformerHolder holder, ClassLoader loader,
+                                          String actualClassName, InjectionState injectionState) throws NoSuchMethodException, IOException {
+        boolean changed = false;
+        InjectContext injectContext = new InjectContext(holder, loader, actualClassName, classNode, injectionState);
         for (MethodNode method : classNode.methods) {
             for (InjectPoint point : holder.injectPoints) {
                 if (!point.matches(method.name, method.desc)) {
                     continue;
                 }
-                if (!hasPrintedMethodHeader && !isSubclass) {
-                    hasPrintedMethodHeader = true;
-                }
-                anyMatched = true;
-                this.applyMixinInject(method, point, holder, loader, actualClassName, classNode,
-                        injectHandlerMethodsToAdd, injectHandlerCalls);
+                changed = true;
+                this.applyMixinInject(method, point, injectContext);
             }
         }
-        if (!injectHandlerMethodsToAdd.isEmpty()) {
-            classNode.methods.addAll(injectHandlerMethodsToAdd);
-        }
+        return changed;
+    }
 
+    private boolean applyRedirectTransforms(ClassNode classNode, TransformerHolder holder, String mixinInternal) {
+        boolean changed = false;
         for (MethodNode method : classNode.methods) {
             for (RedirectPoint point : holder.redirectPoints) {
                 if (!point.matches(method.name, method.desc)) {
                     continue;
                 }
-                if (!hasPrintedMethodHeader && !isSubclass) {
-                    hasPrintedMethodHeader = true;
-                }
-                for (AbstractInsnNode insn : method.instructions.toArray()) {
-                    if (!(insn instanceof MethodInsnNode methodInsn)) {
-                        continue;
-                    }
-                    for (TargetCall targetCall : point.targetCalls) {
-                        if (!targetCall.matches(methodInsn.owner, methodInsn.name, methodInsn.desc)) {
-                            continue;
-                        }
-                        methodInsn.setOpcode(Opcodes.INVOKESTATIC);
-                        methodInsn.owner = mixinInternal;
-                        methodInsn.name = point.mixinMethodName;
-                        methodInsn.desc = point.mixinMethodDesc;
-                        methodInsn.itf = false;
-                        anyMatched = true;
-                    }
-                }
+                changed |= this.applyRedirectToMethod(method, point, mixinInternal);
             }
         }
-        return anyMatched;
+        return changed;
     }
 
-    private void applyOverwrite(MethodNode target, OverwritePoint point, TransformerHolder holder, String targetInternal,
-                                String mixinInternal, ClassNode targetClass, List<MethodNode> lambdaMethodsToAdd) throws IOException, NoSuchMethodException {
-        MethodNode mixinMethod = holder.rewrittenMethodCache.get(point.mixinMethodName + point.mixinMethodDesc);
+    private boolean applyRedirectToMethod(MethodNode method, RedirectPoint point, String mixinInternal) {
+        boolean changed = false;
+        for (AbstractInsnNode insn : method.instructions.toArray()) {
+            if (insn instanceof MethodInsnNode methodInsn && this.rewriteRedirectCall(methodInsn, point, mixinInternal)) {
+                changed = true;
+            }
+        }
+        return changed;
+    }
+
+    private boolean rewriteRedirectCall(MethodInsnNode methodInsn, RedirectPoint point, String mixinInternal) {
+        for (TargetCall targetCall : point.targetCalls) {
+            if (!targetCall.matches(methodInsn.owner, methodInsn.name, methodInsn.desc)) {
+                continue;
+            }
+            methodInsn.setOpcode(Opcodes.INVOKESTATIC);
+            methodInsn.owner = mixinInternal;
+            methodInsn.name = point.mixinMethodName;
+            methodInsn.desc = point.mixinMethodDesc;
+            methodInsn.itf = false;
+            return true;
+        }
+        return false;
+    }
+
+    private static void appendPendingMethods(ClassNode classNode, List<MethodNode> methodsToAdd) {
+        if (!methodsToAdd.isEmpty()) {
+            classNode.methods.addAll(methodsToAdd);
+        }
+    }
+
+    private void applyOverwrite(MethodNode target, OverwritePoint point, MixinCopyContext context) throws IOException, NoSuchMethodException {
+        MethodNode mixinMethod = context.holder.rewrittenMethodCache.get(point.mixinMethodName + point.mixinMethodDesc);
         if (mixinMethod == null) {
             throw new NoSuchMethodException("Cannot find overwrite method: " + point.mixinMethodName + point.mixinMethodDesc);
         }
 
-        MethodNode cloned = holder.cloneMethod(mixinMethod);
-        this.rewriteSelfReferences(cloned, mixinInternal, targetInternal, holder.shadowFields, holder.shadowMethods);
+        MethodNode cloned = context.holder.cloneMethod(mixinMethod);
+        this.rewriteSelfReferences(cloned, context.selfRewriteContext());
         target.instructions = cloned.instructions;
         target.tryCatchBlocks = cloned.tryCatchBlocks;
         target.localVariables = cloned.localVariables;
         target.maxStack = Math.max(cloned.maxStack, 0);
         target.maxLocals = Math.max(cloned.maxLocals, 0);
-        this.copyLambdaMethods(point.mixinClassName, point.mixinMethodName, targetClass, holder, targetInternal, mixinInternal, lambdaMethodsToAdd);
+        this.copyLambdaMethods(point.mixinClassName, point.mixinMethodName, context);
     }
 
-    private void copyLambdaMethods(String mixinClassName, String methodName, ClassNode targetClass, TransformerHolder holder,
-                                   String targetInternal, String mixinInternal, List<MethodNode> lambdaMethodsToAdd) throws IOException {
-        byte[] mixinBytes = this.classProvider.loadMixinBytes(mixinClassName, holder.mixinClassLoader);
+    private void copyLambdaMethods(String mixinClassName, String methodName, MixinCopyContext context) throws IOException {
+        byte[] mixinBytes = this.classProvider.loadMixinBytes(mixinClassName, context.holder.mixinClassLoader);
         ClassNode mixinClass = new ClassNode();
-        new ClassReader(mixinBytes).accept(mixinClass, ClassReader.EXPAND_FRAMES);
+        acceptExpandedClass(mixinBytes, mixinClass);
         String dotPrefix = "lambda." + methodName + ".";
         String dollarPrefix = "lambda$" + methodName + "$";
 
         for (MethodNode mixinMethod : mixinClass.methods) {
             boolean lambdaName = mixinMethod.name.startsWith(dotPrefix) || mixinMethod.name.startsWith(dollarPrefix);
-            boolean exists = this.hasMethod(targetClass, lambdaMethodsToAdd, mixinMethod.name, mixinMethod.desc);
+            boolean exists = this.hasMethod(context.targetClass, context.methodsToAdd, mixinMethod.name, mixinMethod.desc);
             if (!lambdaName || exists) {
                 continue;
             }
-            MethodNode clonedLambda = holder.cloneMethod(mixinMethod);
-            this.rewriteSelfReferences(clonedLambda, mixinInternal, targetInternal, holder.shadowFields, holder.shadowMethods);
-            clonedLambda.desc = clonedLambda.desc.replace(mixinInternal, targetInternal);
+            MethodNode clonedLambda = context.holder.cloneMethod(mixinMethod);
+            this.rewriteSelfReferences(clonedLambda, context.selfRewriteContext());
+            clonedLambda.desc = clonedLambda.desc.replace(context.mixinInternal, context.targetInternal);
             clonedLambda.access = (clonedLambda.access & ~Opcodes.ACC_PRIVATE) | Opcodes.ACC_PUBLIC | Opcodes.ACC_SYNTHETIC;
-            lambdaMethodsToAdd.add(clonedLambda);
+            context.methodsToAdd.add(clonedLambda);
         }
     }
 
-    private void rewriteSelfReferences(MethodNode method, String mixinInternal, String targetInternal,
-                                       Map<String, ShadowFieldInfo> shadowFields,
-                                       Map<String, ShadowMethodInfo> shadowMethods) {
-        if (method.desc.contains(mixinInternal)) {
-            method.desc = method.desc.replace(mixinInternal, targetInternal);
+    /**
+     * Rewrites copied mixin bytecode so references to the mixin owner become
+     * references to the class currently being transformed.
+     */
+    private void rewriteSelfReferences(MethodNode method, SelfRewriteContext context) {
+        if (method.desc.contains(context.mixinInternal)) {
+            method.desc = method.desc.replace(context.mixinInternal, context.targetInternal);
         }
         InsnList instructions = method.instructions;
         if (instructions == null) {
@@ -285,46 +330,71 @@ final class MixinTransformerEngine {
         }
 
         for (AbstractInsnNode node : instructions.toArray()) {
-            if (node instanceof FieldInsnNode field) {
-                if (field.owner.equals(mixinInternal)) {
-                    field.owner = targetInternal;
-                }
-                ShadowFieldInfo shadowField = shadowFields.get(field.name);
-                if (shadowField != null) {
-                    field.name = shadowField.targetFieldName;
-                    field.desc = shadowField.desc;
-                    field.owner = targetInternal;
-                }
-                continue;
-            }
-            if (node instanceof MethodInsnNode methodCall) {
-                if (methodCall.owner.equals(mixinInternal)) {
-                    ShadowMethodInfo shadowMethod = shadowMethods.get(methodCall.name + methodCall.desc);
-                    if (shadowMethod != null) {
-                        methodCall.name = shadowMethod.targetMethodName;
-                        methodCall.desc = shadowMethod.desc;
-                        if (methodCall.getOpcode() == Opcodes.INVOKESTATIC) {
-                            methodCall.setOpcode(Opcodes.INVOKEVIRTUAL);
-                            instructions.insertBefore(methodCall, new VarInsnNode(Opcodes.ALOAD, 0));
-                        }
-                    } else if (methodCall.name.startsWith("lambda.") || methodCall.name.startsWith("lambda$")) {
-                        methodCall.setOpcode(Opcodes.INVOKEVIRTUAL);
-                    }
-                    methodCall.owner = targetInternal;
-                }
-                continue;
-            }
-            if (node instanceof TypeInsnNode typeInsn) {
-                if (typeInsn.desc.equals(mixinInternal)) {
-                    typeInsn.desc = targetInternal;
-                }
-                continue;
-            }
-            if (node instanceof InvokeDynamicInsnNode indy) {
-                this.rewriteInvokeDynamic(instructions, indy, mixinInternal, targetInternal);
-            }
+            this.rewriteSelfInstruction(instructions, node, context);
         }
 
+        this.rewriteLocalVariables(method, context.mixinInternal, context.targetInternal);
+    }
+
+    private void rewriteSelfInstruction(InsnList instructions, AbstractInsnNode node, SelfRewriteContext context) {
+        if (node instanceof FieldInsnNode field) {
+            rewriteSelfFieldReference(field, context);
+            return;
+        }
+        if (node instanceof MethodInsnNode methodCall) {
+            this.rewriteSelfMethodReference(instructions, methodCall, context);
+            return;
+        }
+        if (node instanceof TypeInsnNode typeInsn) {
+            rewriteSelfTypeReference(typeInsn, context.mixinInternal, context.targetInternal);
+            return;
+        }
+        if (node instanceof InvokeDynamicInsnNode indy) {
+            this.rewriteInvokeDynamic(instructions, indy, context.mixinInternal, context.targetInternal);
+        }
+    }
+
+    private static void rewriteSelfFieldReference(FieldInsnNode field, SelfRewriteContext context) {
+        if (field.owner.equals(context.mixinInternal)) {
+            field.owner = context.targetInternal;
+        }
+        ShadowFieldInfo shadowField = context.shadowFields.get(field.name);
+        if (shadowField != null) {
+            field.name = shadowField.targetFieldName;
+            field.desc = shadowField.desc;
+            field.owner = context.targetInternal;
+        }
+    }
+
+    private void rewriteSelfMethodReference(InsnList instructions, MethodInsnNode methodCall, SelfRewriteContext context) {
+        if (!methodCall.owner.equals(context.mixinInternal)) {
+            return;
+        }
+        ShadowMethodInfo shadowMethod = context.shadowMethods.get(methodCall.name + methodCall.desc);
+        if (shadowMethod != null) {
+            this.rewriteShadowMethodCall(instructions, methodCall, shadowMethod);
+        } else if (methodCall.name.startsWith("lambda.") || methodCall.name.startsWith("lambda$")) {
+            methodCall.setOpcode(Opcodes.INVOKEVIRTUAL);
+        }
+        methodCall.owner = context.targetInternal;
+    }
+
+    private void rewriteShadowMethodCall(InsnList instructions, MethodInsnNode methodCall, ShadowMethodInfo shadowMethod) {
+        methodCall.name = shadowMethod.targetMethodName;
+        methodCall.desc = shadowMethod.desc;
+        if (methodCall.getOpcode() == Opcodes.INVOKESTATIC) {
+            methodCall.setOpcode(Opcodes.INVOKEVIRTUAL);
+            instructions.insertBefore(methodCall, new VarInsnNode(Opcodes.ALOAD, 0));
+        }
+    }
+
+    private static void rewriteSelfTypeReference(TypeInsnNode typeInsn, String mixinInternal, String targetInternal) {
+        if (typeInsn.desc.equals(mixinInternal)) {
+            typeInsn.desc = targetInternal;
+        }
+    }
+
+    private static void rewriteLocalVariables(MethodNode method, String mixinInternal, String targetInternal) {
         if (method.localVariables != null) {
             for (LocalVariableNode local : method.localVariables) {
                 if (local.desc != null && local.desc.contains(mixinInternal)) {
@@ -341,133 +411,178 @@ final class MixinTransformerEngine {
         String newDesc = indy.desc.replace(mixinInternal, targetInternal);
         Object[] newBsmArgs = new Object[indy.bsmArgs.length];
         for (int i = 0; i < indy.bsmArgs.length; i++) {
-            Object arg = indy.bsmArgs[i];
-            if (arg instanceof Type type) {
-                String oldDesc = type.getDescriptor();
-                String rewritten = oldDesc.replace(mixinInternal, targetInternal);
-                if (!oldDesc.equals(rewritten)) {
-                    newBsmArgs[i] = type.getSort() == Type.METHOD ? Type.getMethodType(rewritten) : Type.getType(rewritten);
-                } else {
-                    newBsmArgs[i] = arg;
-                }
-            } else if (arg instanceof Handle handle && handle.getOwner().equals(mixinInternal)) {
-                int newTag = handle.getTag();
-                if ((newTag == Opcodes.H_INVOKESTATIC || newTag == Opcodes.H_NEWINVOKESPECIAL)
-                        && (handle.getName().startsWith("lambda.") || handle.getName().startsWith("lambda$"))) {
-                    newTag = Opcodes.H_INVOKEVIRTUAL;
-                }
-                newBsmArgs[i] = new Handle(newTag, targetInternal, handle.getName(),
-                        handle.getDesc().replace(mixinInternal, targetInternal), handle.isInterface());
-            } else {
-                newBsmArgs[i] = arg;
-            }
+            newBsmArgs[i] = this.rewriteBootstrapArg(indy.bsmArgs[i], mixinInternal, targetInternal);
         }
         instructions.set(indy, new InvokeDynamicInsnNode(indy.name, newDesc, indy.bsm, newBsmArgs));
     }
 
-    private void applyMixinInject(MethodNode target, InjectPoint point, TransformerHolder holder, ClassLoader loader,
-                                  String actualClassName, ClassNode classNode, List<MethodNode> injectHandlerMethodsToAdd,
-                                  Map<String, InjectHandlerCall> injectHandlerCalls) throws NoSuchMethodException, IOException {
+    private Object rewriteBootstrapArg(Object arg, String mixinInternal, String targetInternal) {
+        if (arg instanceof Type type) {
+            return rewriteBootstrapType(type, mixinInternal, targetInternal);
+        }
+        if (arg instanceof Handle handle && handle.getOwner().equals(mixinInternal)) {
+            return rewriteBootstrapHandle(handle, mixinInternal, targetInternal);
+        }
+        return arg;
+    }
+
+    private static Object rewriteBootstrapType(Type type, String mixinInternal, String targetInternal) {
+        String oldDesc = type.getDescriptor();
+        String rewritten = oldDesc.replace(mixinInternal, targetInternal);
+        if (oldDesc.equals(rewritten)) {
+            return type;
+        }
+        return type.getSort() == Type.METHOD ? Type.getMethodType(rewritten) : Type.getType(rewritten);
+    }
+
+    private static Handle rewriteBootstrapHandle(Handle handle, String mixinInternal, String targetInternal) {
+        return new Handle(
+                remappedHandleTag(handle),
+                targetInternal,
+                handle.getName(),
+                handle.getDesc().replace(mixinInternal, targetInternal),
+                handle.isInterface());
+    }
+
+    private static int remappedHandleTag(Handle handle) {
+        int tag = handle.getTag();
+        if ((tag == Opcodes.H_INVOKESTATIC || tag == Opcodes.H_NEWINVOKESPECIAL)
+                && (handle.getName().startsWith("lambda.") || handle.getName().startsWith("lambda$"))) {
+            return Opcodes.H_INVOKEVIRTUAL;
+        }
+        return tag;
+    }
+
+    private void applyMixinInject(MethodNode target, InjectPoint point, InjectContext context) throws NoSuchMethodException, IOException {
         Type targetType = Type.getMethodType(target.desc);
         Type[] targetArgs = targetType.getArgumentTypes();
         boolean targetIsInstance = (target.access & Opcodes.ACC_STATIC) == 0;
         String mixinInternal = point.mixinClassName.replace('.', '/');
-        InjectHandlerCall handlerCall = point.mixinMethodStatic
-                ? new InjectHandlerCall(Opcodes.INVOKESTATIC, mixinInternal, point.mixinMethodName, point.mixinMethodDesc, false, false)
-                : this.ensureInjectHandlerMethod(point, holder, classNode, actualClassName, mixinInternal,
-                injectHandlerMethodsToAdd, injectHandlerCalls, targetIsInstance);
+        InjectHandlerCall handlerCall = this.resolveInjectHandler(point, context, mixinInternal, targetIsInstance);
         Type mixinMethodType = Type.getMethodType(handlerCall.desc);
         Type[] mixinArgTypes = mixinMethodType.getArgumentTypes();
-        boolean injectThis = false;
-        if (targetIsInstance && mixinArgTypes.length > 0 && mixinArgTypes[0].getSort() == Type.OBJECT) {
-            String firstArg = mixinArgTypes[0].getInternalName();
-            injectThis = firstArg.equals(holder.targetInternalName) || this.hierarchyResolver.isSubclassASM(actualClassName, firstArg, loader);
-        }
+        boolean injectThis = this.shouldInjectThis(targetIsInstance, mixinArgTypes, context);
 
-        InsnList inject = new InsnList();
-        int baseLocalSlots = Type.getArgumentsAndReturnSizes(target.desc) >> 2;
-        int localIndex = targetIsInstance ? 1 : 0;
-        int callbackVar = -1;
-        boolean hasCallback = false;
-        int targetArgIndex = 0;
-        int mixinArgIndex = 0;
+        InjectionBuildState buildState = new InjectionBuildState(target, targetIsInstance);
+        this.appendReceiverArgument(buildState.inject, handlerCall);
+        this.appendThisArgument(buildState, injectThis);
+        this.appendMixinArguments(buildState, targetArgs, mixinArgTypes);
+        buildState.inject.add(new MethodInsnNode(handlerCall.opcode, handlerCall.owner, handlerCall.name, handlerCall.desc, handlerCall.isInterface));
+        this.appendCallbackReturnGuard(buildState, targetType.getReturnType());
+        this.insertInjectInstructions(target, point.position, buildState.inject);
 
-        if (handlerCall.needsReceiver) {
-            inject.add(new VarInsnNode(Opcodes.ALOAD, 0));
-        }
-        if (injectThis) {
-            inject.add(new VarInsnNode(Opcodes.ALOAD, 0));
-            mixinArgIndex++;
-        }
-
-        while (mixinArgIndex < mixinArgTypes.length) {
-            Type mixinArg = mixinArgTypes[mixinArgIndex];
-            String argInternal = mixinArg.getSort() == Type.OBJECT ? mixinArg.getInternalName() : "";
-            if (MixinConstants.CALL_BACK_INFO.equals(argInternal)) {
-                inject.add(new TypeInsnNode(Opcodes.NEW, MixinConstants.CALL_BACK_INFO));
-                inject.add(new InsnNode(Opcodes.DUP));
-                inject.add(new MethodInsnNode(Opcodes.INVOKESPECIAL, MixinConstants.CALL_BACK_INFO, "<init>", "()V", false));
-                callbackVar = baseLocalSlots;
-                baseLocalSlots++;
-                inject.add(new VarInsnNode(Opcodes.ASTORE, callbackVar));
-                inject.add(new VarInsnNode(Opcodes.ALOAD, callbackVar));
-                hasCallback = true;
-            } else if (targetArgIndex < targetArgs.length) {
-                inject.add(this.getLoadInsn(targetArgs[targetArgIndex], localIndex));
-                localIndex += targetArgs[targetArgIndex].getSize();
-                targetArgIndex++;
-            } else {
-                inject.add(this.getDefaultInsn(mixinArg));
-            }
-            mixinArgIndex++;
-        }
-
-        inject.add(new MethodInsnNode(handlerCall.opcode, handlerCall.owner, handlerCall.name, handlerCall.desc, handlerCall.isInterface));
-
-        if (hasCallback) {
-            LabelNode continueLabel = new LabelNode();
-            inject.add(new VarInsnNode(Opcodes.ALOAD, callbackVar));
-            inject.add(new MethodInsnNode(Opcodes.INVOKEVIRTUAL, MixinConstants.CALL_BACK_INFO, "isBack", "()Z", false));
-            inject.add(new JumpInsnNode(Opcodes.IFEQ, continueLabel));
-            Type returnType = targetType.getReturnType();
-            if (returnType.getSort() != Type.VOID) {
-                inject.add(new VarInsnNode(Opcodes.ALOAD, callbackVar));
-                inject.add(new MethodInsnNode(Opcodes.INVOKEVIRTUAL, MixinConstants.CALL_BACK_INFO, "getBackValue", "()Ljava/lang/Object;", false));
-                inject.add(this.unboxAndReturn(returnType));
-            } else {
-                inject.add(new InsnNode(Opcodes.RETURN));
-            }
-            inject.add(continueLabel);
-        }
-
-        switch (point.position) {
-            case HEAD -> {
-                AbstractInsnNode first = target.instructions.getFirst();
-                if (first != null) {
-                    target.instructions.insertBefore(first, inject);
-                } else {
-                    target.instructions.add(inject);
-                }
-            }
-            case LAST -> this.insertBeforeReturns(target, inject);
-            default -> {
-                AbstractInsnNode first = target.instructions.getFirst();
-                if (first != null) {
-                    target.instructions.insertBefore(first, inject);
-                } else {
-                    target.instructions.add(inject);
-                }
-            }
-        }
-
-        target.maxLocals = Math.max(target.maxLocals, baseLocalSlots);
+        target.maxLocals = Math.max(target.maxLocals, buildState.baseLocalSlots);
         target.maxStack = Math.max(target.maxStack, 0);
     }
 
-    private InjectHandlerCall ensureInjectHandlerMethod(InjectPoint point, TransformerHolder holder, ClassNode targetClass,
-                                                        String actualClassName, String mixinInternal,
-                                                        List<MethodNode> methodsToAdd,
-                                                        Map<String, InjectHandlerCall> handlerCalls,
+    private InjectHandlerCall resolveInjectHandler(InjectPoint point, InjectContext context, String mixinInternal,
+                                                   boolean targetIsInstance) throws NoSuchMethodException, IOException {
+        if (point.mixinMethodStatic) {
+            return new InjectHandlerCall(Opcodes.INVOKESTATIC, mixinInternal, point.mixinMethodName, point.mixinMethodDesc, false, false);
+        }
+        return this.ensureInjectHandlerMethod(point, context, mixinInternal, targetIsInstance);
+    }
+
+    private boolean shouldInjectThis(boolean targetIsInstance, Type[] mixinArgTypes, InjectContext context) {
+        if (!targetIsInstance || mixinArgTypes.length == 0 || mixinArgTypes[0].getSort() != Type.OBJECT) {
+            return false;
+        }
+        String firstArg = mixinArgTypes[0].getInternalName();
+        return firstArg.equals(context.holder.targetInternalName)
+                || this.hierarchyResolver.isSubclassASM(context.actualClassName, firstArg, context.loader);
+    }
+
+    private void appendReceiverArgument(InsnList inject, InjectHandlerCall handlerCall) {
+        if (handlerCall.needsReceiver) {
+            inject.add(new VarInsnNode(Opcodes.ALOAD, 0));
+        }
+    }
+
+    private void appendThisArgument(InjectionBuildState buildState, boolean injectThis) {
+        if (injectThis) {
+            buildState.inject.add(new VarInsnNode(Opcodes.ALOAD, 0));
+            buildState.mixinArgIndex++;
+        }
+    }
+
+    private void appendMixinArguments(InjectionBuildState buildState, Type[] targetArgs, Type[] mixinArgTypes) {
+        while (buildState.mixinArgIndex < mixinArgTypes.length) {
+            this.appendMixinArgument(buildState, targetArgs, mixinArgTypes[buildState.mixinArgIndex]);
+            buildState.mixinArgIndex++;
+        }
+    }
+
+    private void appendMixinArgument(InjectionBuildState buildState, Type[] targetArgs, Type mixinArg) {
+        String argInternal = mixinArg.getSort() == Type.OBJECT ? mixinArg.getInternalName() : "";
+        if (MixinConstants.CALL_BACK_INFO.equals(argInternal)) {
+            this.appendCallbackArgument(buildState);
+            return;
+        }
+        if (buildState.targetArgIndex < targetArgs.length) {
+            this.appendTargetArgument(buildState, targetArgs);
+            return;
+        }
+        buildState.inject.add(this.getDefaultInsn(mixinArg));
+    }
+
+    private void appendCallbackArgument(InjectionBuildState buildState) {
+        buildState.inject.add(new TypeInsnNode(Opcodes.NEW, MixinConstants.CALL_BACK_INFO));
+        buildState.inject.add(new InsnNode(Opcodes.DUP));
+        buildState.inject.add(new MethodInsnNode(Opcodes.INVOKESPECIAL, MixinConstants.CALL_BACK_INFO, "<init>", "()V", false));
+        buildState.callbackVar = buildState.baseLocalSlots;
+        buildState.baseLocalSlots++;
+        buildState.inject.add(new VarInsnNode(Opcodes.ASTORE, buildState.callbackVar));
+        buildState.inject.add(new VarInsnNode(Opcodes.ALOAD, buildState.callbackVar));
+        buildState.hasCallback = true;
+    }
+
+    private void appendTargetArgument(InjectionBuildState buildState, Type[] targetArgs) {
+        Type targetArg = targetArgs[buildState.targetArgIndex];
+        buildState.inject.add(this.getLoadInsn(targetArg, buildState.localIndex));
+        buildState.localIndex += targetArg.getSize();
+        buildState.targetArgIndex++;
+    }
+
+    private void appendCallbackReturnGuard(InjectionBuildState buildState, Type returnType) {
+        if (!buildState.hasCallback) {
+            return;
+        }
+        LabelNode continueLabel = new LabelNode();
+        buildState.inject.add(new VarInsnNode(Opcodes.ALOAD, buildState.callbackVar));
+        buildState.inject.add(new MethodInsnNode(Opcodes.INVOKEVIRTUAL, MixinConstants.CALL_BACK_INFO, "isBack", "()Z", false));
+        buildState.inject.add(new JumpInsnNode(Opcodes.IFEQ, continueLabel));
+        this.appendCallbackReturnValue(buildState.inject, buildState.callbackVar, returnType);
+        buildState.inject.add(continueLabel);
+    }
+
+    private void appendCallbackReturnValue(InsnList inject, int callbackVar, Type returnType) {
+        if (returnType.getSort() == Type.VOID) {
+            inject.add(new InsnNode(Opcodes.RETURN));
+            return;
+        }
+        inject.add(new VarInsnNode(Opcodes.ALOAD, callbackVar));
+        inject.add(new MethodInsnNode(Opcodes.INVOKEVIRTUAL, MixinConstants.CALL_BACK_INFO, "getBackValue", "()Ljava/lang/Object;", false));
+        inject.add(this.unboxAndReturn(returnType));
+    }
+
+    private void insertInjectInstructions(MethodNode target, InsertPosition position, InsnList inject) {
+        if (position == InsertPosition.LAST) {
+            this.insertBeforeReturns(target, inject);
+            return;
+        }
+        insertAtMethodStart(target, inject);
+    }
+
+    private static void insertAtMethodStart(MethodNode target, InsnList inject) {
+        AbstractInsnNode first = target.instructions.getFirst();
+        if (first != null) {
+            target.instructions.insertBefore(first, inject);
+        } else {
+            target.instructions.add(inject);
+        }
+    }
+
+    private InjectHandlerCall ensureInjectHandlerMethod(InjectPoint point, InjectContext context, String mixinInternal,
                                                         boolean targetIsInstance) throws NoSuchMethodException, IOException {
         if (!targetIsInstance) {
             throw new IllegalStateException("@Inject handler must be static when target method is static: "
@@ -475,32 +590,34 @@ final class MixinTransformerEngine {
         }
 
         String key = point.mixinClassName + '\n' + point.mixinMethodName + point.mixinMethodDesc;
-        InjectHandlerCall existing = handlerCalls.get(key);
+        InjectHandlerCall existing = context.injectionState.handlerCalls.get(key);
         if (existing != null) {
             return existing;
         }
 
-        MethodNode mixinMethod = holder.rewrittenMethodCache.get(point.mixinMethodName + point.mixinMethodDesc);
+        MethodNode mixinMethod = context.holder.rewrittenMethodCache.get(point.mixinMethodName + point.mixinMethodDesc);
         if (mixinMethod == null) {
             throw new NoSuchMethodException("Cannot find inject method: " + point.mixinMethodName + point.mixinMethodDesc);
         }
 
-        MethodNode handler = holder.cloneMethod(mixinMethod);
-        this.rewriteSelfReferences(handler, mixinInternal, actualClassName, holder.shadowFields, holder.shadowMethods);
-        handler.name = this.uniqueInjectHandlerName(point, handler.desc, targetClass, methodsToAdd);
+        MethodNode handler = context.holder.cloneMethod(mixinMethod);
+        this.rewriteSelfReferences(handler, new SelfRewriteContext(mixinInternal, context.actualClassName,
+                context.holder.shadowFields, context.holder.shadowMethods));
+        handler.name = this.uniqueInjectHandlerName(point, handler.desc, context.classNode, context.injectionState.methodsToAdd);
         handler.access = (handler.access & ~(Opcodes.ACC_PUBLIC | Opcodes.ACC_PROTECTED | Opcodes.ACC_STATIC
                 | Opcodes.ACC_ABSTRACT | Opcodes.ACC_NATIVE)) | Opcodes.ACC_PRIVATE | Opcodes.ACC_SYNTHETIC;
         handler.visibleAnnotations = null;
         handler.invisibleAnnotations = null;
         handler.visibleParameterAnnotations = null;
         handler.invisibleParameterAnnotations = null;
-        methodsToAdd.add(handler);
-        this.copyLambdaMethods(point.mixinClassName, point.mixinMethodName, targetClass, holder,
-                actualClassName, mixinInternal, methodsToAdd);
+        context.injectionState.methodsToAdd.add(handler);
+        this.copyLambdaMethods(point.mixinClassName, point.mixinMethodName,
+                new MixinCopyContext(context.classNode, context.holder, context.actualClassName, mixinInternal,
+                        context.injectionState.methodsToAdd));
 
-        InjectHandlerCall call = new InjectHandlerCall(Opcodes.INVOKESPECIAL, actualClassName, handler.name,
-                handler.desc, (targetClass.access & Opcodes.ACC_INTERFACE) != 0, true);
-        handlerCalls.put(key, call);
+        InjectHandlerCall call = new InjectHandlerCall(Opcodes.INVOKESPECIAL, context.actualClassName, handler.name,
+                handler.desc, (context.classNode.access & Opcodes.ACC_INTERFACE) != 0, true);
+        putValue(context.injectionState.handlerCalls, key, call);
         return call;
     }
 
@@ -548,42 +665,68 @@ final class MixinTransformerEngine {
             if (method.instructions == null) {
                 continue;
             }
-            for (AbstractInsnNode insn : method.instructions.toArray()) {
-                if (!(insn instanceof FieldInsnNode fieldInsn)) {
-                    continue;
-                }
-                ReturnFieldPoint point = this.matchReturnField(fieldInsn, loader, points);
-                if (point == null) {
-                    continue;
-                }
+            changed |= this.applyReturnFieldsToMethod(method, loader, points);
+        }
+        return changed;
+    }
 
-                int opcode = fieldInsn.getOpcode();
-                if (opcode == Opcodes.GETFIELD || opcode == Opcodes.GETSTATIC) {
-                    if (!point.isStatic) {
-                        method.instructions.insertBefore(fieldInsn, new InsnNode(Opcodes.DUP));
-                    }
-                    method.instructions.insert(fieldInsn, this.invokeReturnFieldHandler(point));
-                } else if (opcode == Opcodes.PUTFIELD) {
-                    Type fieldType = Type.getType(fieldInsn.desc);
-                    int tempLocal = Math.max(method.maxLocals, 0);
-                    method.maxLocals = tempLocal + fieldType.getSize();
-
-                    InsnList replacement = new InsnList();
-                    replacement.add(new VarInsnNode(fieldType.getOpcode(Opcodes.ISTORE), tempLocal));
-                    replacement.add(new InsnNode(Opcodes.DUP));
-                    replacement.add(new VarInsnNode(fieldType.getOpcode(Opcodes.ILOAD), tempLocal));
-                    replacement.add(this.newReturnFieldHandlerCall(point));
-                    if (point.returnCastType != null) {
-                        replacement.add(new TypeInsnNode(Opcodes.CHECKCAST, point.returnCastType));
-                    }
-                    method.instructions.insertBefore(fieldInsn, replacement);
-                } else if (opcode == Opcodes.PUTSTATIC) {
-                    method.instructions.insertBefore(fieldInsn, this.invokeReturnFieldHandler(point));
-                }
-                changed = true;
+    private boolean applyReturnFieldsToMethod(MethodNode method, ClassLoader loader, List<ReturnFieldPoint> points) {
+        boolean changed = false;
+        for (AbstractInsnNode insn : method.instructions.toArray()) {
+            if (insn instanceof FieldInsnNode fieldInsn) {
+                changed |= this.applyReturnFieldInstruction(method, fieldInsn, loader, points);
             }
         }
         return changed;
+    }
+
+    private boolean applyReturnFieldInstruction(MethodNode method, FieldInsnNode fieldInsn,
+                                                ClassLoader loader, List<ReturnFieldPoint> points) {
+        ReturnFieldPoint point = this.matchReturnField(fieldInsn, loader, points);
+        if (point == null) {
+            return false;
+        }
+
+        int opcode = fieldInsn.getOpcode();
+        if (opcode == Opcodes.GETFIELD || opcode == Opcodes.GETSTATIC) {
+            this.applyReturnFieldRead(method, fieldInsn, point);
+            return true;
+        }
+        if (opcode == Opcodes.PUTFIELD) {
+            this.applyReturnFieldInstanceWrite(method, fieldInsn, point);
+            return true;
+        }
+        if (opcode == Opcodes.PUTSTATIC) {
+            method.instructions.insertBefore(fieldInsn, this.invokeReturnFieldHandler(point));
+            return true;
+        }
+        return false;
+    }
+
+    private void applyReturnFieldRead(MethodNode method, FieldInsnNode fieldInsn, ReturnFieldPoint point) {
+        if (!point.isStatic) {
+            method.instructions.insertBefore(fieldInsn, new InsnNode(Opcodes.DUP));
+        }
+        method.instructions.insert(fieldInsn, this.invokeReturnFieldHandler(point));
+    }
+
+    private void applyReturnFieldInstanceWrite(MethodNode method, FieldInsnNode fieldInsn, ReturnFieldPoint point) {
+        Type fieldType = Type.getType(fieldInsn.desc);
+        int tempLocal = Math.max(method.maxLocals, 0);
+        method.maxLocals = tempLocal + fieldType.getSize();
+        method.instructions.insertBefore(fieldInsn, this.returnFieldInstanceWriteReplacement(point, fieldType, tempLocal));
+    }
+
+    private InsnList returnFieldInstanceWriteReplacement(ReturnFieldPoint point, Type fieldType, int tempLocal) {
+        InsnList replacement = new InsnList();
+        replacement.add(new VarInsnNode(fieldType.getOpcode(Opcodes.ISTORE), tempLocal));
+        replacement.add(new InsnNode(Opcodes.DUP));
+        replacement.add(new VarInsnNode(fieldType.getOpcode(Opcodes.ILOAD), tempLocal));
+        replacement.add(this.newReturnFieldHandlerCall(point));
+        if (point.returnCastType != null) {
+            replacement.add(new TypeInsnNode(Opcodes.CHECKCAST, point.returnCastType));
+        }
+        return replacement;
     }
 
     private InsnList invokeReturnFieldHandler(ReturnFieldPoint point) {
@@ -716,13 +859,25 @@ final class MixinTransformerEngine {
         HashMap<LabelNode, LabelNode> labels = new HashMap<>();
         for (AbstractInsnNode insn = source.getFirst(); insn != null; insn = insn.getNext()) {
             if (insn instanceof LabelNode label) {
-                labels.put(label, new LabelNode());
+                putValue(labels, label, new LabelNode());
             }
         }
         for (AbstractInsnNode insn = source.getFirst(); insn != null; insn = insn.getNext()) {
             copy.add(insn.clone(labels));
         }
         return copy;
+    }
+
+    private static void acceptExpandedClass(byte[] classBytes, ClassNode classNode) {
+        try {
+            new ClassReader(classBytes).accept(classNode, ClassReader.EXPAND_FRAMES);
+        } catch (RuntimeException exception) {
+            throw exception;
+        }
+    }
+
+    private static <K, V> V putValue(Map<K, V> map, K key, V value) {
+        return map.put(key, value);
     }
 
     static void fixMethodBounds(ClassNode classNode) {
@@ -739,6 +894,84 @@ final class MixinTransformerEngine {
                 }
                 method.maxLocals = Math.max(method.maxLocals, requiredSize);
             }
+        }
+    }
+
+    private static final class InjectionState {
+        private final List<MethodNode> methodsToAdd;
+        private final Map<String, InjectHandlerCall> handlerCalls = new HashMap<>();
+
+        private InjectionState(List<MethodNode> methodsToAdd) {
+            this.methodsToAdd = methodsToAdd;
+        }
+    }
+
+    private static final class MixinCopyContext {
+        private final ClassNode targetClass;
+        private final TransformerHolder holder;
+        private final String targetInternal;
+        private final String mixinInternal;
+        private final List<MethodNode> methodsToAdd;
+
+        private MixinCopyContext(ClassNode targetClass, TransformerHolder holder, String targetInternal,
+                                 String mixinInternal, List<MethodNode> methodsToAdd) {
+            this.targetClass = targetClass;
+            this.holder = holder;
+            this.targetInternal = targetInternal;
+            this.mixinInternal = mixinInternal;
+            this.methodsToAdd = methodsToAdd;
+        }
+
+        private SelfRewriteContext selfRewriteContext() {
+            return new SelfRewriteContext(this.mixinInternal, this.targetInternal, this.holder.shadowFields, this.holder.shadowMethods);
+        }
+    }
+
+    private static final class SelfRewriteContext {
+        private final String mixinInternal;
+        private final String targetInternal;
+        private final Map<String, ShadowFieldInfo> shadowFields;
+        private final Map<String, ShadowMethodInfo> shadowMethods;
+
+        private SelfRewriteContext(String mixinInternal, String targetInternal,
+                                   Map<String, ShadowFieldInfo> shadowFields,
+                                   Map<String, ShadowMethodInfo> shadowMethods) {
+            this.mixinInternal = mixinInternal;
+            this.targetInternal = targetInternal;
+            this.shadowFields = shadowFields;
+            this.shadowMethods = shadowMethods;
+        }
+    }
+
+    private static final class InjectContext {
+        private final TransformerHolder holder;
+        private final ClassLoader loader;
+        private final String actualClassName;
+        private final ClassNode classNode;
+        private final InjectionState injectionState;
+
+        private InjectContext(TransformerHolder holder, ClassLoader loader, String actualClassName,
+                              ClassNode classNode, InjectionState injectionState) {
+            this.holder = holder;
+            this.loader = loader;
+            this.actualClassName = actualClassName;
+            this.classNode = classNode;
+            this.injectionState = injectionState;
+        }
+    }
+
+    private static final class InjectionBuildState {
+        private final InsnList inject = new InsnList();
+        private int baseLocalSlots;
+        private int localIndex;
+        private int callbackVar = -1;
+        private boolean hasCallback;
+        private int targetArgIndex;
+        private int mixinArgIndex;
+
+        private InjectionBuildState(MethodNode target, boolean targetIsInstance) {
+            this.baseLocalSlots = Type.getArgumentsAndReturnSizes(target.desc) >> 2;
+            this.localIndex = targetIsInstance ? 1 : 0;
         }
     }
 }

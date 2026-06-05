@@ -25,6 +25,11 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 
+/**
+ * Stores the pre-scanned mixin metadata used while transforming a single target
+ * class. The holder keeps ASM nodes instead of loading mixin classes, because
+ * loading them too early can trigger side effects during class transformation.
+ */
 final class TransformerHolder {
     final MixinClassProvider classProvider;
     final MixinHierarchyResolver hierarchyResolver;
@@ -44,27 +49,23 @@ final class TransformerHolder {
     final ThreadLocal<String> currentTargetClass;
     final ClassNode mixinClassNode;
 
-    TransformerHolder(MixinClassProvider classProvider, MixinHierarchyResolver hierarchyResolver,
-                      String mixinClassName, String targetInternalName,
-                      ClassLoader loader, ThreadLocal<Boolean> hasPrintedShadowHeader,
-                      ThreadLocal<String> currentTargetClass, ClassLoader mixinClassLoader,
-                      MixinMappingResolver mappingResolver) throws IOException {
-        this.classProvider = classProvider;
-        this.hierarchyResolver = hierarchyResolver;
-        this.mixinClassName = mixinClassName;
-        this.targetInternalName = targetInternalName;
-        this.loader = loader != null ? loader : classProvider.getRuntimeClassLoader();
-        this.mixinClassLoader = mixinClassLoader != null ? mixinClassLoader : this.loader;
-        this.mappingResolver = mappingResolver == null ? MixinMappingResolver.EMPTY : mappingResolver;
-        this.hasPrintedShadowHeader = hasPrintedShadowHeader;
-        this.currentTargetClass = currentTargetClass;
+    TransformerHolder(Services services, ClassInfo info, ClassLoader loader) throws IOException {
+        this.classProvider = services.classProvider;
+        this.hierarchyResolver = services.hierarchyResolver;
+        this.mixinClassName = info.mixinClassName;
+        this.targetInternalName = info.targetInternalName;
+        this.loader = loader != null ? loader : services.classProvider.getRuntimeClassLoader();
+        this.mixinClassLoader = info.mixinClassLoader != null ? info.mixinClassLoader : this.loader;
+        this.mappingResolver = info.mappingResolver == null ? MixinMappingResolver.EMPTY : info.mappingResolver;
+        this.hasPrintedShadowHeader = services.hasPrintedShadowHeader;
+        this.currentTargetClass = services.currentTargetClass;
         this.mixinClassNode = this.scanWithASM();
     }
 
     private ClassNode scanWithASM() throws IOException {
         byte[] mixinBytes = this.classProvider.loadMixinBytes(this.mixinClassName, this.mixinClassLoader);
         ClassNode classNode = new ClassNode();
-        new ClassReader(mixinBytes).accept(classNode, ClassReader.EXPAND_FRAMES);
+        acceptExpandedClass(mixinBytes, classNode);
         String mixinInternal = this.mixinClassName.replace('.', '/');
         boolean remap = this.mappingResolver.isEnabled() && !this.hasNoRemapping(classNode);
 
@@ -84,58 +85,95 @@ final class TransformerHolder {
 
     private void scanShadowFields(ClassNode classNode, boolean remap) {
         for (FieldNode field : classNode.fields) {
-            for (AnnotationNode annotation : MixinAnnotationUtils.annotationNodes(field.visibleAnnotations, field.invisibleAnnotations)) {
-                if (!MixinConstants.SHADOW_CLASS.equals(annotation.desc)) {
-                    continue;
-                }
-                String targetFieldName = MixinAnnotationUtils.annotationStringValue(annotation, "value", field.name);
-                if (remap) {
-                    targetFieldName = this.mappingResolver.mapFieldName(this.targetInternalName, targetFieldName);
-                }
-                String targetFieldDesc = remap ? this.mappingResolver.mapDescriptor(field.desc) : field.desc;
-                this.shadowFields.put(field.name, new ShadowFieldInfo(field.name, targetFieldName, targetFieldDesc));
-                this.ensureShadowHeader();
-                break;
+            AnnotationNode annotation = MixinAnnotationUtils.findAnnotation(
+                    field.visibleAnnotations,
+                    field.invisibleAnnotations,
+                    MixinConstants.SHADOW_CLASS);
+            if (annotation == null) {
+                continue;
             }
+            String targetFieldName = MixinAnnotationUtils.annotationStringValue(annotation, "value", field.name);
+            if (remap) {
+                targetFieldName = this.mappingResolver.mapFieldName(this.targetInternalName, targetFieldName);
+            }
+            String targetFieldDesc = remap ? this.mappingResolver.mapDescriptor(field.desc) : field.desc;
+            putValue(this.shadowFields, field.name, new ShadowFieldInfo(field.name, targetFieldName, targetFieldDesc));
+            this.ensureShadowHeader();
         }
     }
 
+    /**
+     * Reads all supported mixin annotations on one method, then stores a cached
+     * method clone with shadow references already pointed at the target class.
+     */
     private void scanMethod(MethodNode method, String mixinInternal, boolean remap) {
-        ArrayList<InjectInfo> injects = new ArrayList<>();
-        ArrayList<OverwriteInfo> overwrites = new ArrayList<>();
-
+        MethodScan scan = new MethodScan();
         for (AnnotationNode annotation : MixinAnnotationUtils.annotationNodes(method.visibleAnnotations, method.invisibleAnnotations)) {
-            String desc = annotation.desc;
-            if (MixinConstants.SHADOW_CLASS.equals(desc)) {
-                ShadowMethodInfo shadowMethodInfo = this.getShadowMethodInfo(method, annotation, remap);
-                this.shadowMethods.put(method.name + method.desc, shadowMethodInfo);
-                this.ensureShadowHeader();
-            } else if (MixinConstants.RETURN_FIELD_CLASS.equals(desc)) {
-                this.addReturnFieldPoints(method, annotation, mixinInternal, remap);
-            } else if (MixinConstants.INJECT_CLASS.equals(desc)) {
-                injects.addAll(this.readInjectPoints(annotation, InsertPosition.HEAD, remap));
-            } else if (MixinConstants.ASM_CLASS.equals(desc)) {
-                this.reportUnsupportedASMHandler(method);
-            } else if (MixinConstants.REDIRECT_CLASS.equals(desc)) {
-                this.redirectPoints.addAll(this.readRedirectPoints(method, annotation, remap));
-            } else if (MixinConstants.OVERWRITE_CLASS.equals(desc)) {
-                overwrites.addAll(this.readOverwritePoints(annotation, remap));
-            }
+            this.scanMethodAnnotation(method, annotation, mixinInternal, remap, scan);
         }
 
+        this.registerInjectPoints(method, scan.injects);
+        this.registerOverwritePoints(method, scan.overwrites);
+        this.cacheRewrittenMethod(method, mixinInternal);
+    }
+
+    /**
+     * Routes each annotation kind to the parser that understands its remapping
+     * and target descriptor rules.
+     */
+    private void scanMethodAnnotation(MethodNode method, AnnotationNode annotation, String mixinInternal,
+                                      boolean remap, MethodScan scan) {
+        String desc = annotation.desc;
+        if (MixinConstants.SHADOW_CLASS.equals(desc)) {
+            this.registerShadowMethod(method, annotation, remap);
+            return;
+        }
+        if (MixinConstants.RETURN_FIELD_CLASS.equals(desc)) {
+            this.addReturnFieldPoints(method, annotation, mixinInternal, remap);
+            return;
+        }
+        if (MixinConstants.INJECT_CLASS.equals(desc)) {
+            scan.injects.addAll(this.readInjectPoints(annotation, InsertPosition.HEAD, remap));
+            return;
+        }
+        if (MixinConstants.ASM_CLASS.equals(desc)) {
+            this.reportUnsupportedASMHandler(method);
+            return;
+        }
+        if (MixinConstants.REDIRECT_CLASS.equals(desc)) {
+            this.redirectPoints.addAll(this.readRedirectPoints(method, annotation, remap));
+            return;
+        }
+        if (MixinConstants.OVERWRITE_CLASS.equals(desc)) {
+            scan.overwrites.addAll(this.readOverwritePoints(annotation, remap));
+        }
+    }
+
+    private void registerShadowMethod(MethodNode method, AnnotationNode annotation, boolean remap) {
+        ShadowMethodInfo shadowMethodInfo = this.getShadowMethodInfo(method, annotation, remap);
+        putValue(this.shadowMethods, method.name + method.desc, shadowMethodInfo);
+        this.ensureShadowHeader();
+    }
+
+    private void registerInjectPoints(MethodNode method, List<InjectInfo> injects) {
         for (InjectInfo injectInfo : injects) {
             this.injectPoints.add(new InjectPoint(injectInfo.methodName, injectInfo.desc, injectInfo.at,
                     this.mixinClassName, method.name, method.desc, (method.access & Opcodes.ACC_STATIC) != 0,
                     InjectMode.MIXIN));
         }
+    }
+
+    private void registerOverwritePoints(MethodNode method, List<OverwriteInfo> overwrites) {
         for (OverwriteInfo overwriteInfo : overwrites) {
             this.overwritePoints.add(new OverwritePoint(overwriteInfo.methodName, overwriteInfo.desc,
                     this.mixinClassName, method.name, method.desc));
         }
+    }
 
+    private void cacheRewrittenMethod(MethodNode method, String mixinInternal) {
         MethodNode clonedMethod = this.cloneMethod(method);
         this.rewriteShadowReferences(clonedMethod, mixinInternal);
-        this.rewrittenMethodCache.put(method.name + method.desc, clonedMethod);
+        putValue(this.rewrittenMethodCache, method.name + method.desc, clonedMethod);
     }
 
     private List<InjectInfo> readInjectPoints(AnnotationNode annotation, InsertPosition defaultPosition, boolean remap) {
@@ -221,70 +259,104 @@ final class TransformerHolder {
         return new ShadowMethodInfo(method.name, targetMethodName, targetMethodDesc);
     }
 
+    /**
+     * Builds field access interception points after checking handler signature
+     * compatibility. Invalid handlers are ignored with a diagnostic instead of
+     * producing broken bytecode.
+     */
     private void addReturnFieldPoints(MethodNode method, AnnotationNode annotation, String mixinInternal, boolean remap) {
-        if ((method.access & Opcodes.ACC_STATIC) == 0 || (method.access & Opcodes.ACC_PUBLIC) == 0) {
-            System.err.println("[SeraMixin] @ReturnField handler must be public static: "
-                    + this.mixinClassName + "." + method.name + method.desc);
+        ReturnFieldSpec spec = this.readReturnFieldSpec(annotation);
+        if (!this.validateReturnFieldMethod(method) || !this.validateReturnFieldSpec(method, spec)) {
             return;
         }
 
+        Type[] args = Type.getMethodType(method.desc).getArgumentTypes();
+        if (!this.validateReturnFieldArguments(method, spec, args)) {
+            return;
+        }
+
+        String fieldDesc = this.resolveReturnFieldDescriptor(spec, args, remap);
+        String handlerDescForCheck = remap ? this.mappingResolver.mapDescriptor(method.desc) : method.desc;
+        String returnCastType = this.resolveReturnCastType(fieldDesc, handlerDescForCheck, spec.isStatic);
+        if (ReturnFieldPoint.INCOMPATIBLE_CAST.equals(returnCastType)) {
+            System.err.println("[SeraMixin] @ReturnField handler desc mismatch for "
+                    + this.targetInternalName + " fields " + spec.fields + ": fieldDesc=" + fieldDesc
+                    + " handler=" + method.desc);
+            return;
+        }
+
+        this.addReturnFieldTargets(method, mixinInternal, remap, new ReturnFieldTargetSpec(spec, fieldDesc, returnCastType));
+    }
+
+    private ReturnFieldSpec readReturnFieldSpec(AnnotationNode annotation) {
         List<String> fields = MixinAnnotationUtils.annotationStringListValue(annotation, "field");
         String fieldDesc = MixinAnnotationUtils.annotationTypeDescriptorValue(annotation, "type");
         boolean isStatic = MixinAnnotationUtils.annotationBooleanValue(annotation, "isStatic", false);
         boolean read = MixinAnnotationUtils.annotationBooleanValue(annotation, "read", true);
         boolean write = MixinAnnotationUtils.annotationBooleanValue(annotation, "write", true);
+        return new ReturnFieldSpec(fields, fieldDesc, isStatic, read, write);
+    }
 
-        if (fields.isEmpty()) {
+    private boolean validateReturnFieldMethod(MethodNode method) {
+        if ((method.access & Opcodes.ACC_STATIC) != 0 && (method.access & Opcodes.ACC_PUBLIC) != 0) {
+            return true;
+        }
+        System.err.println("[SeraMixin] @ReturnField handler must be public static: "
+                + this.mixinClassName + "." + method.name + method.desc);
+        return false;
+    }
+
+    private boolean validateReturnFieldSpec(MethodNode method, ReturnFieldSpec spec) {
+        if (spec.fields.isEmpty()) {
             System.err.println("[SeraMixin] @ReturnField has no field names: " + this.mixinClassName + "." + method.name + method.desc);
-            return;
+            return false;
         }
-        if (!read && !write) {
-            System.err.println("[SeraMixin] @ReturnField must handle read or write: " + this.mixinClassName + "." + method.name + method.desc);
-            return;
+        if (spec.read || spec.write) {
+            return true;
         }
+        System.err.println("[SeraMixin] @ReturnField must handle read or write: " + this.mixinClassName + "." + method.name + method.desc);
+        return false;
+    }
 
-        Type[] args = Type.getMethodType(method.desc).getArgumentTypes();
-        int expectedArgCount = isStatic ? 1 : 2;
+    private boolean validateReturnFieldArguments(MethodNode method, ReturnFieldSpec spec, Type[] args) {
+        int expectedArgCount = spec.isStatic ? 1 : 2;
         if (args.length != expectedArgCount) {
             System.err.println("[SeraMixin] @ReturnField handler must accept exactly "
                     + expectedArgCount + " argument(s): " + this.mixinClassName + "." + method.name + method.desc);
-            return;
+            return false;
         }
-        if (!isStatic && !this.isReturnFieldSelfArgCompatible(args[0])) {
-            System.err.println("[SeraMixin] @ReturnField handler first argument must be "
-                    + this.targetInternalName.replace('/', '.') + " or its supertype: "
-                    + this.mixinClassName + "." + method.name + method.desc);
-            return;
+        if (spec.isStatic || this.isReturnFieldSelfArgCompatible(args[0])) {
+            return true;
         }
+        System.err.println("[SeraMixin] @ReturnField handler first argument must be "
+                + this.targetInternalName.replace('/', '.') + " or its supertype: "
+                + this.mixinClassName + "." + method.name + method.desc);
+        return false;
+    }
+
+    private String resolveReturnFieldDescriptor(ReturnFieldSpec spec, Type[] args, boolean remap) {
+        String fieldDesc = spec.fieldDesc;
         if (fieldDesc == null || fieldDesc.isEmpty()) {
-            fieldDesc = args[isStatic ? 0 : 1].getDescriptor();
+            fieldDesc = args[spec.isStatic ? 0 : 1].getDescriptor();
         }
-        if (remap) {
-            fieldDesc = this.mappingResolver.mapDescriptor(fieldDesc);
-        }
+        return remap ? this.mappingResolver.mapDescriptor(fieldDesc) : fieldDesc;
+    }
 
-        String handlerDescForCheck = remap ? this.mappingResolver.mapDescriptor(method.desc) : method.desc;
-        String returnCastType = this.resolveReturnCastType(fieldDesc, handlerDescForCheck, isStatic);
-        if (ReturnFieldPoint.INCOMPATIBLE_CAST.equals(returnCastType)) {
-            System.err.println("[SeraMixin] @ReturnField handler desc mismatch for "
-                    + this.targetInternalName + " fields " + fields + ": fieldDesc=" + fieldDesc
-                    + " handler=" + method.desc);
-            return;
-        }
-
-        for (String fieldName : new LinkedHashSet<>(fields)) {
+    private void addReturnFieldTargets(MethodNode method, String mixinInternal, boolean remap, ReturnFieldTargetSpec targetSpec) {
+        ReturnFieldSpec spec = targetSpec.spec;
+        for (String fieldName : new LinkedHashSet<>(spec.fields)) {
             String targetFieldName = remap ? this.mappingResolver.mapFieldName(this.targetInternalName, fieldName) : fieldName;
             this.returnFieldPoints.add(new ReturnFieldPoint(
                     this.targetInternalName,
                     targetFieldName,
-                    fieldDesc,
-                    isStatic,
+                    targetSpec.fieldDesc,
+                    spec.isStatic,
                     mixinInternal,
                     method.name,
                     method.desc,
-                    returnCastType,
-                    read,
-                    write));
+                    targetSpec.returnCastType,
+                    spec.read,
+                    spec.write));
         }
     }
 
@@ -322,6 +394,10 @@ final class TransformerHolder {
         return null;
     }
 
+    /**
+     * Rewrites shadow member calls in cloned mixin methods so the final method
+     * body targets the transformed class instead of the mixin class.
+     */
     private void rewriteShadowReferences(MethodNode method, String mixinInternal) {
         if (this.shadowFields.isEmpty() && this.shadowMethods.isEmpty()) {
             return;
@@ -332,62 +408,85 @@ final class TransformerHolder {
         }
         for (AbstractInsnNode node : instructions.toArray()) {
             if (node instanceof FieldInsnNode fieldNode) {
-                ShadowFieldInfo shadowField = this.shadowFields.get(fieldNode.name);
-                if (!fieldNode.owner.equals(mixinInternal) || shadowField == null) {
-                    continue;
-                }
-                fieldNode.owner = this.targetInternalName;
-                fieldNode.name = shadowField.targetFieldName;
-                fieldNode.desc = shadowField.desc;
-                int opcode = fieldNode.getOpcode();
-                if (opcode == Opcodes.GETSTATIC) {
-                    fieldNode.setOpcode(Opcodes.GETFIELD);
-                    instructions.insertBefore(fieldNode, new VarInsnNode(Opcodes.ALOAD, 0));
-                } else if (opcode == Opcodes.PUTSTATIC) {
-                    fieldNode.setOpcode(Opcodes.PUTFIELD);
-                    Type type = Type.getType(shadowField.desc);
-                    instructions.insertBefore(fieldNode, new VarInsnNode(Opcodes.ALOAD, 0));
-                    instructions.insertBefore(fieldNode, type.getSize() == 1 ? new InsnNode(Opcodes.SWAP) : new InsnNode(Opcodes.DUP_X2));
-                    if (type.getSize() == 2) {
-                        instructions.insertBefore(fieldNode, new InsnNode(Opcodes.POP));
-                    }
-                }
+                this.rewriteShadowFieldReference(instructions, fieldNode, mixinInternal);
                 continue;
             }
-            if (!(node instanceof MethodInsnNode methodNode) || !methodNode.owner.equals(mixinInternal)) {
-                continue;
-            }
-
-            ShadowMethodInfo shadowMethod = this.shadowMethods.get(methodNode.name + methodNode.desc);
-            if (shadowMethod == null) {
-                for (ShadowMethodInfo info : this.shadowMethods.values()) {
-                    if (info.mixinMethodName.equals(methodNode.name)) {
-                        shadowMethod = info;
-                        break;
-                    }
-                }
-            }
-            if (shadowMethod == null) {
-                continue;
-            }
-
-            methodNode.owner = this.targetInternalName;
-            methodNode.name = shadowMethod.targetMethodName;
-            methodNode.desc = shadowMethod.desc;
-            if (methodNode.getOpcode() == Opcodes.INVOKESTATIC) {
-                methodNode.setOpcode(Opcodes.INVOKEVIRTUAL);
-                instructions.insertBefore(methodNode, new VarInsnNode(Opcodes.ALOAD, 0));
+            if (node instanceof MethodInsnNode methodNode) {
+                this.rewriteShadowMethodReference(instructions, methodNode, mixinInternal);
             }
         }
     }
 
+    private void rewriteShadowFieldReference(InsnList instructions, FieldInsnNode fieldNode, String mixinInternal) {
+        ShadowFieldInfo shadowField = this.shadowFields.get(fieldNode.name);
+        if (!fieldNode.owner.equals(mixinInternal) || shadowField == null) {
+            return;
+        }
+        fieldNode.owner = this.targetInternalName;
+        fieldNode.name = shadowField.targetFieldName;
+        fieldNode.desc = shadowField.desc;
+        this.rewriteStaticShadowFieldAccess(instructions, fieldNode, shadowField.desc);
+    }
+
+    private void rewriteStaticShadowFieldAccess(InsnList instructions, FieldInsnNode fieldNode, String fieldDesc) {
+        int opcode = fieldNode.getOpcode();
+        if (opcode == Opcodes.GETSTATIC) {
+            fieldNode.setOpcode(Opcodes.GETFIELD);
+            instructions.insertBefore(fieldNode, new VarInsnNode(Opcodes.ALOAD, 0));
+            return;
+        }
+        if (opcode == Opcodes.PUTSTATIC) {
+            fieldNode.setOpcode(Opcodes.PUTFIELD);
+            Type type = Type.getType(fieldDesc);
+            instructions.insertBefore(fieldNode, new VarInsnNode(Opcodes.ALOAD, 0));
+            instructions.insertBefore(fieldNode, type.getSize() == 1 ? new InsnNode(Opcodes.SWAP) : new InsnNode(Opcodes.DUP_X2));
+            if (type.getSize() == 2) {
+                instructions.insertBefore(fieldNode, new InsnNode(Opcodes.POP));
+            }
+        }
+    }
+
+    private void rewriteShadowMethodReference(InsnList instructions, MethodInsnNode methodNode, String mixinInternal) {
+        if (!methodNode.owner.equals(mixinInternal)) {
+            return;
+        }
+        ShadowMethodInfo shadowMethod = this.findShadowMethod(methodNode);
+        if (shadowMethod == null) {
+            return;
+        }
+        methodNode.owner = this.targetInternalName;
+        methodNode.name = shadowMethod.targetMethodName;
+        methodNode.desc = shadowMethod.desc;
+        if (methodNode.getOpcode() == Opcodes.INVOKESTATIC) {
+            methodNode.setOpcode(Opcodes.INVOKEVIRTUAL);
+            instructions.insertBefore(methodNode, new VarInsnNode(Opcodes.ALOAD, 0));
+        }
+    }
+
+    private ShadowMethodInfo findShadowMethod(MethodInsnNode methodNode) {
+        ShadowMethodInfo shadowMethod = this.shadowMethods.get(methodNode.name + methodNode.desc);
+        if (shadowMethod != null) {
+            return shadowMethod;
+        }
+        for (ShadowMethodInfo info : this.shadowMethods.values()) {
+            if (info.mixinMethodName.equals(methodNode.name)) {
+                return info;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Performs an ASM method clone with fresh labels so inserted bytecode does
+     * not share mutable instruction metadata with the original mixin method.
+     */
     MethodNode cloneMethod(MethodNode original) {
         MethodNode copy = new MethodNode(original.access, original.name, original.desc, original.signature,
                 original.exceptions != null ? original.exceptions.toArray(new String[0]) : null);
         HashMap<LabelNode, LabelNode> labelMap = new HashMap<>();
         for (AbstractInsnNode insn = original.instructions.getFirst(); insn != null; insn = insn.getNext()) {
             if (insn instanceof LabelNode label) {
-                labelMap.put(label, new LabelNode());
+                putValue(labelMap, label, new LabelNode());
             }
         }
         for (AbstractInsnNode insn = original.instructions.getFirst(); insn != null; insn = insn.getNext()) {
@@ -396,16 +495,16 @@ final class TransformerHolder {
         if (original.tryCatchBlocks != null) {
             for (TryCatchBlockNode block : original.tryCatchBlocks) {
                 copy.tryCatchBlocks.add(new TryCatchBlockNode(
-                        labelMap.get(block.start),
-                        labelMap.get(block.end),
-                        labelMap.get(block.handler),
+                        labelFor(labelMap, block.start),
+                        labelFor(labelMap, block.end),
+                        labelFor(labelMap, block.handler),
                         block.type));
             }
         }
         if (original.localVariables != null) {
             for (LocalVariableNode local : original.localVariables) {
                 copy.localVariables.add(new LocalVariableNode(local.name, local.desc, local.signature,
-                        labelMap.get(local.start), labelMap.get(local.end), local.index));
+                        labelFor(labelMap, local.start), labelFor(labelMap, local.end), local.index));
             }
         }
         copy.maxStack = Math.max(original.maxStack, 0);
@@ -413,9 +512,61 @@ final class TransformerHolder {
         return copy;
     }
 
+    private boolean shadowHeaderPrinted() {
+        return Boolean.TRUE.equals(this.hasPrintedShadowHeader.get());
+    }
+
+    private static void acceptExpandedClass(byte[] classBytes, ClassNode classNode) {
+        try {
+            new ClassReader(classBytes).accept(classNode, ClassReader.EXPAND_FRAMES);
+        } catch (RuntimeException exception) {
+            throw exception;
+        }
+    }
+
+    private static <K, V> V putValue(Map<K, V> map, K key, V value) {
+        return map.put(key, value);
+    }
+
+    private static LabelNode labelFor(Map<LabelNode, LabelNode> labelMap, LabelNode label) {
+        return labelMap.get(label);
+    }
+
     private void ensureShadowHeader() {
-        if (!Boolean.TRUE.equals(this.hasPrintedShadowHeader.get())) {
+        if (!this.shadowHeaderPrinted()) {
             this.hasPrintedShadowHeader.set(true);
+        }
+    }
+
+    private static final class MethodScan {
+        private final ArrayList<InjectInfo> injects = new ArrayList<>();
+        private final ArrayList<OverwriteInfo> overwrites = new ArrayList<>();
+    }
+
+    private static final class ReturnFieldTargetSpec {
+        private final ReturnFieldSpec spec;
+        private final String fieldDesc;
+        private final String returnCastType;
+
+        private ReturnFieldTargetSpec(ReturnFieldSpec spec, String fieldDesc, String returnCastType) {
+            this.spec = spec;
+            this.fieldDesc = fieldDesc;
+            this.returnCastType = returnCastType;
+        }
+    }
+
+    static final class Services {
+        private final MixinClassProvider classProvider;
+        private final MixinHierarchyResolver hierarchyResolver;
+        private final ThreadLocal<Boolean> hasPrintedShadowHeader;
+        private final ThreadLocal<String> currentTargetClass;
+
+        Services(MixinClassProvider classProvider, MixinHierarchyResolver hierarchyResolver,
+                 ThreadLocal<Boolean> hasPrintedShadowHeader, ThreadLocal<String> currentTargetClass) {
+            this.classProvider = classProvider;
+            this.hierarchyResolver = hierarchyResolver;
+            this.hasPrintedShadowHeader = hasPrintedShadowHeader;
+            this.currentTargetClass = currentTargetClass;
         }
     }
 
@@ -423,5 +574,8 @@ final class TransformerHolder {
     }
 
     private record OverwriteInfo(String methodName, String desc) {
+    }
+
+    private record ReturnFieldSpec(List<String> fields, String fieldDesc, boolean isStatic, boolean read, boolean write) {
     }
 }

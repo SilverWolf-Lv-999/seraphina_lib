@@ -18,7 +18,7 @@ final class SvgShapeParser {
 
     static Shape parseShape(Element element) {
         return switch (SvgParsing.tagName(element)) {
-            case "path" -> SvgPathParser.parse(element.getAttribute("d"));
+            case "path" -> SvgPathParser.parsePath(element.getAttribute("d"));
             case "line" -> parseLine(element);
             case "rect" -> parseRect(element);
             case "circle" -> parseCircle(element);

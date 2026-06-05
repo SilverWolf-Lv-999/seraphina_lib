@@ -31,17 +31,18 @@ final class SvgPathParser {
         }
     }
 
-    static Path2D.Float parse(String data) {
+    static Path2D.Float parsePath(String data) {
         if (data == null || data.isBlank()) {
             return new Path2D.Float();
         }
-        return new SvgPathParser(data).parse();
+        return new SvgPathParser(data).buildPath();
     }
 
-    private Path2D.Float parse() {
+    private Path2D.Float buildPath() {
         while (index < tokens.size()) {
-            if (isCommand(tokens.get(index))) {
-                command = tokens.get(index++).charAt(0);
+            if (isCommand(currentToken())) {
+                command = currentToken().charAt(0);
+                index++;
             }
 
             if (command == 0) {
@@ -235,7 +236,7 @@ final class SvgPathParser {
     }
 
     private float readFloat() {
-        if (index >= tokens.size() || isCommand(tokens.get(index))) {
+        if (index >= tokens.size() || isCommand(currentToken())) {
             throw new IllegalArgumentException("SVG path data has too few values");
         }
         return Float.parseFloat(tokens.get(index++));
@@ -248,5 +249,9 @@ final class SvgPathParser {
 
     private static boolean isCommand(String token) {
         return token.length() == 1 && Character.isLetter(token.charAt(0));
+    }
+
+    private String currentToken() {
+        return tokens.get(index);
     }
 }

@@ -17,6 +17,10 @@ final class SvgRenderer {
     private SvgRenderer() {
     }
 
+    /**
+     * Renders the SVG root into an ARGB image using the document viewBox as the
+     * coordinate system for all child elements.
+     */
     static BufferedImage render(Element root, Rectangle2D.Float viewBox,
                                 Map<String, Map<String, String>> classStyles,
                                 int width, int height) {
@@ -38,8 +42,8 @@ final class SvgRenderer {
     private static void renderElement(Graphics2D graphics, Element element, SvgStyle inheritedStyle,
                                       Map<String, Map<String, String>> classStyles) {
         SvgStyle style = inheritedStyle.resolve(element, classStyles);
-        AffineTransform oldTransform = graphics.getTransform();
-        graphics.transform(SvgTransformParser.parse(element.getAttribute("transform")));
+        AffineTransform oldTransform = currentTransform(graphics);
+        graphics.transform(SvgTransformParser.parseTransform(element.getAttribute("transform")));
 
         try {
             Shape shape = SvgShapeParser.parseShape(element);
@@ -84,5 +88,9 @@ final class SvgRenderer {
         graphics.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BICUBIC);
         graphics.setRenderingHint(RenderingHints.KEY_RENDERING, RenderingHints.VALUE_RENDER_QUALITY);
         graphics.setRenderingHint(RenderingHints.KEY_STROKE_CONTROL, RenderingHints.VALUE_STROKE_PURE);
+    }
+
+    private static AffineTransform currentTransform(Graphics2D graphics) {
+        return graphics.getTransform();
     }
 }

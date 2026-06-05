@@ -12,7 +12,11 @@ final class SvgTransformParser {
     private SvgTransformParser() {
     }
 
-    static AffineTransform parse(String value) {
+    /**
+     * Applies SVG transform commands in source order, matching how nested SVG
+     * groups compose their local coordinate systems.
+     */
+    static AffineTransform parseTransform(String value) {
         AffineTransform transform = new AffineTransform();
         if (value == null || value.isBlank()) {
             return transform;
@@ -22,50 +26,83 @@ final class SvgTransformParser {
         while (matcher.find()) {
             String type = matcher.group(1).toLowerCase(Locale.ROOT);
             List<Float> numbers = SvgParsing.parseNumberList(matcher.group(2));
-            switch (type) {
-                case "matrix" -> {
-                    if (numbers.size() >= 6) {
-                        transform.concatenate(new AffineTransform(
-                                numbers.get(0), numbers.get(1), numbers.get(2),
-                                numbers.get(3), numbers.get(4), numbers.get(5)
-                        ));
-                    }
-                }
-                case "translate" -> {
-                    if (!numbers.isEmpty()) {
-                        transform.translate(numbers.get(0), numbers.size() >= 2 ? numbers.get(1) : 0.0F);
-                    }
-                }
-                case "scale" -> {
-                    if (!numbers.isEmpty()) {
-                        transform.scale(numbers.get(0), numbers.size() >= 2 ? numbers.get(1) : numbers.get(0));
-                    }
-                }
-                case "rotate" -> {
-                    if (!numbers.isEmpty()) {
-                        double radians = Math.toRadians(numbers.get(0));
-                        if (numbers.size() >= 3) {
-                            transform.rotate(radians, numbers.get(1), numbers.get(2));
-                        } else {
-                            transform.rotate(radians);
-                        }
-                    }
-                }
-                case "skewx" -> {
-                    if (!numbers.isEmpty()) {
-                        transform.shear(Math.tan(Math.toRadians(numbers.get(0))), 0.0D);
-                    }
-                }
-                case "skewy" -> {
-                    if (!numbers.isEmpty()) {
-                        transform.shear(0.0D, Math.tan(Math.toRadians(numbers.get(0))));
-                    }
-                }
-                default -> {
-                }
-            }
+            applyCommand(transform, type, numbers);
         }
 
         return transform;
+    }
+
+    private static void applyCommand(AffineTransform transform, String type, List<Float> numbers) {
+        switch (type) {
+            case "matrix" -> applyMatrix(transform, numbers);
+            case "translate" -> applyTranslate(transform, numbers);
+            case "scale" -> applyScale(transform, numbers);
+            case "rotate" -> applyRotate(transform, numbers);
+            case "skewx" -> applySkewX(transform, numbers);
+            case "skewy" -> applySkewY(transform, numbers);
+            default -> {
+            }
+        }
+    }
+
+    private static void applyMatrix(AffineTransform transform, List<Float> numbers) {
+        if (numbers.size() < 6) {
+            return;
+        }
+        float scaleX = numbers.get(0);
+        float shearY = numbers.get(1);
+        float shearX = numbers.get(2);
+        float scaleY = numbers.get(3);
+        float translateX = numbers.get(4);
+        float translateY = numbers.get(5);
+        transform.concatenate(new AffineTransform(scaleX, shearY, shearX, scaleY, translateX, translateY));
+    }
+
+    private static void applyTranslate(AffineTransform transform, List<Float> numbers) {
+        if (numbers.isEmpty()) {
+            return;
+        }
+        float translateX = numbers.get(0);
+        float translateY = numbers.size() >= 2 ? numbers.get(1) : 0.0F;
+        transform.translate(translateX, translateY);
+    }
+
+    private static void applyScale(AffineTransform transform, List<Float> numbers) {
+        if (numbers.isEmpty()) {
+            return;
+        }
+        float scaleX = numbers.get(0);
+        float scaleY = numbers.size() >= 2 ? numbers.get(1) : scaleX;
+        transform.scale(scaleX, scaleY);
+    }
+
+    private static void applyRotate(AffineTransform transform, List<Float> numbers) {
+        if (numbers.isEmpty()) {
+            return;
+        }
+        double radians = Math.toRadians(numbers.get(0));
+        if (numbers.size() < 3) {
+            transform.rotate(radians);
+            return;
+        }
+        float centerX = numbers.get(1);
+        float centerY = numbers.get(2);
+        transform.rotate(radians, centerX, centerY);
+    }
+
+    private static void applySkewX(AffineTransform transform, List<Float> numbers) {
+        if (numbers.isEmpty()) {
+            return;
+        }
+        float degrees = numbers.get(0);
+        transform.shear(Math.tan(Math.toRadians(degrees)), 0.0D);
+    }
+
+    private static void applySkewY(AffineTransform transform, List<Float> numbers) {
+        if (numbers.isEmpty()) {
+            return;
+        }
+        float degrees = numbers.get(0);
+        transform.shear(0.0D, Math.tan(Math.toRadians(degrees)));
     }
 }

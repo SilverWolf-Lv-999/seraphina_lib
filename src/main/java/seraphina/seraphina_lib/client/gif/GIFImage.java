@@ -214,10 +214,15 @@ public class GIFImage {
         RenderSystem.enableBlend();
         RenderSystem.defaultBlendFunc();
         RenderSystem.setShaderColor(1.0F, 1.0F, 1.0F, 1.0F);
-        ClientImageUtil.drawTexturedQuad(graphics, frameLocations.get(currentFrameIndex), x, y,
+        ResourceLocation frameLocation = currentFrameLocation();
+        ClientImageUtil.drawTexturedQuad(graphics, frameLocation, x, y,
                 Math.max(1.0F, width), Math.max(1.0F, height), clampedAlpha, tint);
         RenderSystem.setShaderColor(1.0F, 1.0F, 1.0F, 1.0F);
         RenderSystem.disableBlend();
+    }
+
+    private ResourceLocation currentFrameLocation() {
+        return frameLocations.get(currentFrameIndex);
     }
 
     private void ensureLoaded() {

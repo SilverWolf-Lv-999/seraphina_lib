@@ -112,9 +112,9 @@ public class SeraMixinLaunchPluginService implements ILaunchPluginService {
             throwable.printStackTrace(System.err);
             return ComputeFlags.NO_REWRITE;
         } finally {
-            this.currentTargetClass.remove();
-            this.isSubclassMode.remove();
-            this.hasPrintedShadowHeader.remove();
+            clearThreadLocal(this.currentTargetClass);
+            clearThreadLocal(this.isSubclassMode);
+            clearThreadLocal(this.hasPrintedShadowHeader);
         }
     }
 
@@ -229,7 +229,7 @@ public class SeraMixinLaunchPluginService implements ILaunchPluginService {
 
     void drainPendingMixins() {
         for (PendingMixin pending : PENDING_MIXINS) {
-            if (PENDING_MIXINS.remove(pending)) {
+            if (drainPendingMixin(pending)) {
                 pending.apply(this);
             }
         }
@@ -244,7 +244,19 @@ public class SeraMixinLaunchPluginService implements ILaunchPluginService {
     }
 
     void prepareProviderMapping(ISeraMixin provider) {
-        this.mappingManager.prepare(provider);
+        this.mappingManager.resolverForProvider(provider);
+    }
+
+    private static boolean drainPendingMixin(PendingMixin pending) {
+        return PENDING_MIXINS.remove(pending);
+    }
+
+    private static void clearThreadLocal(ThreadLocal<?> local) {
+        try {
+            local.remove();
+        } catch (RuntimeException exception) {
+            throw exception;
+        }
     }
 
     private void ensureMixinServicesLoaded() {

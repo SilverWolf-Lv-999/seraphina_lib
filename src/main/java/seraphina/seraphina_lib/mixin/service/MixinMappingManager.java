@@ -19,7 +19,7 @@ import java.util.concurrent.ConcurrentHashMap;
 final class MixinMappingManager {
     private final Map<String, MixinMappingResolver> providerMappings = new ConcurrentHashMap<>();
 
-    MixinMappingResolver prepare(ISeraMixin provider) {
+    MixinMappingResolver resolverForProvider(ISeraMixin provider) {
         if (provider == null) {
             return MixinMappingResolver.EMPTY;
         }
@@ -45,7 +45,7 @@ final class MixinMappingManager {
             if (mappingFile == null) {
                 return MixinMappingResolver.EMPTY;
             }
-            MixinMappingResolver resolver = MixinMappingResolver.read(mappingFile, mappingType);
+            MixinMappingResolver resolver = MixinMappingResolver.readMapping(mappingFile, mappingType);
             if (resolver.isEnabled()) {
                 System.out.println("[SeraMixin] Loaded mapping " + mappingFile.toAbsolutePath());
             }
@@ -74,10 +74,18 @@ final class MixinMappingManager {
             needWrite = false;
         }
         if (needWrite) {
-            Files.write(targetFile, data, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
+            writeMappingFile(targetFile, data);
             System.out.println("[SeraMixin] Extracted mapping -> " + targetFile.toAbsolutePath());
         }
         return targetFile;
+    }
+
+    private static void writeMappingFile(Path targetFile, byte[] data) throws IOException {
+        try {
+            Files.write(targetFile, data, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
+        } catch (IOException exception) {
+            throw exception;
+        }
     }
 
     private byte[] readResource(Class<?> providerClass, String resourcePath) throws IOException {
@@ -175,7 +183,7 @@ final class MixinMappingResolver {
         this.classMappings = classMappings;
     }
 
-    static MixinMappingResolver read(Path mappingFile, String mappingType) throws IOException {
+    static MixinMappingResolver readMapping(Path mappingFile, String mappingType) throws IOException {
         MappingBuilder builder = new MappingBuilder();
         try (BufferedReader reader = Files.newBufferedReader(mappingFile, StandardCharsets.UTF_8)) {
             String line;
@@ -335,6 +343,10 @@ final class MixinMappingResolver {
         return index >= 0 ? line.substring(0, index) : line;
     }
 
+    private static <K, V> V putValue(Map<K, V> map, K key, V value) {
+        return map.put(key, value);
+    }
+
     private static final class MappingBuilder {
         private final Map<String, String> classNames = new HashMap<>();
         private final Map<String, String> reverseClassNames = new HashMap<>();
@@ -343,13 +355,13 @@ final class MixinMappingResolver {
         void addClass(String runtimeName, String sourceName) {
             String runtime = normalizeInternalName(runtimeName);
             String source = normalizeInternalName(sourceName);
-            this.classNames.put(source, runtime);
-            this.reverseClassNames.put(runtime, source);
+            putValue(this.classNames, source, runtime);
+            putValue(this.reverseClassNames, runtime, source);
             this.classMappings.computeIfAbsent(source, ignored -> new MappingClass());
         }
 
         void addField(String runtimeOwner, String runtimeName, String sourceOwner, String sourceName) {
-            this.ensureClassMapping(runtimeOwner, sourceOwner).fields.put(sourceName, runtimeName);
+            putValue(this.ensureClassMapping(runtimeOwner, sourceOwner).fields, sourceName, runtimeName);
         }
 
         void addMethod(String runtimeOwner, String runtimeName, String runtimeDesc,
@@ -380,7 +392,7 @@ final class MixinMappingResolver {
         private static Map<String, MappingClass> copyClassMappings(Map<String, MappingClass> source) {
             HashMap<String, MappingClass> copy = new HashMap<>();
             for (Map.Entry<String, MappingClass> entry : source.entrySet()) {
-                copy.put(entry.getKey(), entry.getValue().copy());
+                putValue(copy, entry.getKey(), entry.getValue().copy());
             }
             return Map.copyOf(copy);
         }
@@ -394,7 +406,7 @@ final class MixinMappingResolver {
             MappingClass copy = new MappingClass();
             copy.fields.putAll(this.fields);
             for (Map.Entry<String, List<MappingMethod>> entry : this.methods.entrySet()) {
-                copy.methods.put(entry.getKey(), List.copyOf(entry.getValue()));
+                putValue(copy.methods, entry.getKey(), List.copyOf(entry.getValue()));
             }
             return copy;
         }

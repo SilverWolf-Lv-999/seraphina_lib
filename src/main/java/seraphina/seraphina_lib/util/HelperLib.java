@@ -14,6 +14,7 @@ import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.OutputStream;
 import java.lang.invoke.MethodHandle;
 import java.lang.module.ResolvedModule;
 import java.lang.reflect.AccessibleObject;
@@ -311,16 +312,34 @@ public final class HelperLib {
                     Map<String, ResolvedModule> existingNameToModule = HelperLib.getFieldValue(layer.configuration(), "nameToModule", Map.class);
                     if (existingModules == null || existingNameToModule == null) return;
 
-                    Set<ResolvedModule> modules = new HashSet<>(existingModules);
-                    Map<String, ResolvedModule> nameToModule = new HashMap<>(existingNameToModule);
-
-                    modules.remove(nameToModule.remove(moduleName));
+                    Set<ResolvedModule> modules = copyModulesWithout(existingModules, moduleName);
+                    Map<String, ResolvedModule> nameToModule = copyNameToModuleWithout(existingNameToModule, moduleName);
 
                     HelperLib.setFieldValue(layer.configuration(), "modules", modules);
                     HelperLib.setFieldValue(layer.configuration(), "nameToModule", nameToModule);
                 }
             });
         });
+    }
+
+    private static Set<ResolvedModule> copyModulesWithout(Set<ResolvedModule> source, String moduleName) {
+        Set<ResolvedModule> modules = new HashSet<>();
+        for (ResolvedModule module : source) {
+            if (!moduleName.equals(module.name())) {
+                modules.add(module);
+            }
+        }
+        return modules;
+    }
+
+    private static Map<String, ResolvedModule> copyNameToModuleWithout(Map<String, ResolvedModule> source, String moduleName) {
+        Map<String, ResolvedModule> nameToModule = new HashMap<>();
+        for (Map.Entry<String, ResolvedModule> entry : source.entrySet()) {
+            if (!moduleName.equals(entry.getKey())) {
+                ResolvedModule ignored = nameToModule.put(entry.getKey(), entry.getValue());
+            }
+        }
+        return nameToModule;
     }
 
     /**
@@ -373,7 +392,6 @@ public final class HelperLib {
             String classPath = className.replace('.', '/') + ".class";
             JarEntry entry = jarFile.getJarEntry(classPath);
             if (entry == null) {
-                jarFile.close();
                 throw new ClassNotFoundException("Class not found in JAR: " + className);
             }
             try (InputStream is = jarFile.getInputStream(entry)) {
@@ -408,10 +426,19 @@ public final class HelperLib {
         byte[] data = new byte[4096];
         int bytesRead;
         while ((bytesRead = is.read(data, 0, data.length)) != -1) {
-            buffer.write(data, 0, bytesRead);
+            appendBytes(buffer, data, bytesRead);
         }
         buffer.flush();
         return buffer.toByteArray();
+    }
+
+    private static void appendBytes(ByteArrayOutputStream buffer, byte[] data, int bytesRead) throws IOException {
+        try {
+            OutputStream output = buffer;
+            output.write(data, 0, bytesRead);
+        } catch (IOException exception) {
+            throw exception;
+        }
     }
 
     static {

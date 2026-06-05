@@ -249,8 +249,16 @@ public class ClassUtils {
 		ClassWriter writer = new ClassWriter(ClassReader.EXPAND_FRAMES);
 		SimpleRemapper remapper = new SimpleRemapper(oldInternal, "Nega");
 		ClassRemapper classRemapper = new ClassRemapper(writer, remapper);
-		reader.accept(classRemapper, ClassReader.EXPAND_FRAMES);
+		acceptExpanded(reader, classRemapper);
 		return writer.toByteArray();
+	}
+
+	private static void acceptExpanded(ClassReader reader, ClassRemapper classRemapper) {
+		try {
+			reader.accept(classRemapper, ClassReader.EXPAND_FRAMES);
+		} catch (RuntimeException exception) {
+			throw exception;
+		}
 	}
 
 	/**
