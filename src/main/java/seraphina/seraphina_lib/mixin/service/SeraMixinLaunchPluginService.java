@@ -53,6 +53,10 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 
+/**
+ * @author Seraphina
+ * @version 2.6
+ * */
 public class SeraMixinLaunchPluginService implements ILaunchPluginService {
     private static final String SERVICE_FILE = "META-INF/services/" + ISeraMixin.class.getName();
     private static final String SHADOW_CLASS = Type.getDescriptor(Shadow.class);
