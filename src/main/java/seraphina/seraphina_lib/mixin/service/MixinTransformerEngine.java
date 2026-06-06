@@ -8,11 +8,13 @@ import org.objectweb.asm.tree.AbstractInsnNode;
 import org.objectweb.asm.tree.ClassNode;
 import org.objectweb.asm.tree.FieldInsnNode;
 import org.objectweb.asm.tree.FieldNode;
+import org.objectweb.asm.tree.IntInsnNode;
 import org.objectweb.asm.tree.InsnList;
 import org.objectweb.asm.tree.InsnNode;
 import org.objectweb.asm.tree.InvokeDynamicInsnNode;
 import org.objectweb.asm.tree.JumpInsnNode;
 import org.objectweb.asm.tree.LabelNode;
+import org.objectweb.asm.tree.LdcInsnNode;
 import org.objectweb.asm.tree.LocalVariableNode;
 import org.objectweb.asm.tree.MethodInsnNode;
 import org.objectweb.asm.tree.MethodNode;
@@ -200,6 +202,9 @@ final class MixinTransformerEngine {
         boolean anyMatched = this.applyOverwriteTransforms(classNode, holder, targetInternal, mixinInternal, lambdaMethodsToAdd);
         appendPendingMethods(classNode, lambdaMethodsToAdd);
         anyMatched |= this.applyInjectTransforms(classNode, holder, loader, actualClassName, injectionState);
+        anyMatched |= this.applyModifyConstantTransforms(classNode, holder, loader, actualClassName, injectionState);
+        anyMatched |= this.applyModifyArgsTransforms(classNode, holder, loader, actualClassName, injectionState);
+        anyMatched |= this.applyModifyVariableTransforms(classNode, holder, loader, actualClassName, injectionState);
         appendPendingMethods(classNode, injectHandlerMethodsToAdd);
         anyMatched |= this.applyRedirectTransforms(classNode, holder, mixinInternal);
         anyMatched |= this.applyMixinMembers(classNode, holder, mixinInternal, actualClassName);
@@ -232,6 +237,51 @@ final class MixinTransformerEngine {
                     continue;
                 }
                 changed |= this.applyMixinInject(method, point, injectContext);
+            }
+        }
+        return changed;
+    }
+
+    private boolean applyModifyConstantTransforms(ClassNode classNode, TransformerHolder holder, ClassLoader loader,
+                                                  String actualClassName, InjectionState injectionState) throws NoSuchMethodException, IOException {
+        boolean changed = false;
+        InjectContext context = new InjectContext(holder, loader, actualClassName, classNode, injectionState);
+        for (MethodNode method : classNode.methods) {
+            for (ModifyConstantPoint point : holder.modifyConstantPoints) {
+                if (!point.matches(method.name, method.desc)) {
+                    continue;
+                }
+                changed |= this.applyModifyConstantToMethod(method, point, context);
+            }
+        }
+        return changed;
+    }
+
+    private boolean applyModifyArgsTransforms(ClassNode classNode, TransformerHolder holder, ClassLoader loader,
+                                              String actualClassName, InjectionState injectionState) throws NoSuchMethodException, IOException {
+        boolean changed = false;
+        InjectContext context = new InjectContext(holder, loader, actualClassName, classNode, injectionState);
+        for (MethodNode method : classNode.methods) {
+            for (ModifyArgsPoint point : holder.modifyArgsPoints) {
+                if (!point.matches(method.name, method.desc)) {
+                    continue;
+                }
+                changed |= this.applyModifyArgsToMethod(method, point, context);
+            }
+        }
+        return changed;
+    }
+
+    private boolean applyModifyVariableTransforms(ClassNode classNode, TransformerHolder holder, ClassLoader loader,
+                                                  String actualClassName, InjectionState injectionState) throws NoSuchMethodException, IOException {
+        boolean changed = false;
+        InjectContext context = new InjectContext(holder, loader, actualClassName, classNode, injectionState);
+        for (MethodNode method : classNode.methods) {
+            for (ModifyVariablePoint point : holder.modifyVariablePoints) {
+                if (!point.matches(method.name, method.desc)) {
+                    continue;
+                }
+                changed |= this.applyModifyVariableToMethod(method, point, context);
             }
         }
         return changed;
@@ -514,6 +564,425 @@ final class MixinTransformerEngine {
             return true;
         }
         return false;
+    }
+
+    private boolean applyModifyConstantToMethod(MethodNode method, ModifyConstantPoint point,
+                                                InjectContext context) throws NoSuchMethodException, IOException {
+        ValueHandlerTypes handlerTypes = this.validateUnaryValueHandler("@ModifyConstant",
+                point.mixinClassName, point.mixinMethodName, point.mixinMethodDesc);
+        if (handlerTypes == null) {
+            return false;
+        }
+        Type requestedType = this.optionalType(point.constantTypeDesc);
+        if (requestedType != null && !isSameStackValueType(handlerTypes.argumentType, requestedType)) {
+            this.reportInvalidHandler("@ModifyConstant", point.mixinClassName, point.mixinMethodName, point.mixinMethodDesc,
+                    "handler argument does not match requested constant type " + requestedType.getDescriptor());
+            return false;
+        }
+
+        String mixinInternal = point.mixinClassName.replace('.', '/');
+        InjectHandlerCall handlerCall = this.ensureTransformHandler("@ModifyConstant", "modifyConstant",
+                point.mixinClassName, point.mixinMethodName, point.mixinMethodDesc, point.mixinMethodStatic,
+                context, mixinInternal, (method.access & Opcodes.ACC_STATIC) == 0);
+        if (handlerCall == null) {
+            return false;
+        }
+
+        ArrayList<ConstantInstruction> matches = new ArrayList<>();
+        for (AbstractInsnNode insn : method.instructions.toArray()) {
+            ConstantInstruction constant = this.constantInstruction(insn);
+            if (constant != null && this.matchesModifyConstant(constant, point, handlerTypes.argumentType, requestedType)) {
+                matches.add(constant);
+            }
+        }
+        List<ConstantInstruction> selected = this.selectOrdinal(matches, point.ordinal);
+        for (ConstantInstruction constant : selected) {
+            Type outputType = requestedType != null ? requestedType : constant.type;
+            method.instructions.insert(constant.node, this.valueHandlerInvocation(method, handlerCall, handlerTypes, outputType));
+        }
+        return !selected.isEmpty();
+    }
+
+    private boolean applyModifyVariableToMethod(MethodNode method, ModifyVariablePoint point,
+                                                InjectContext context) throws NoSuchMethodException, IOException {
+        if (!point.load && !point.store) {
+            return false;
+        }
+        ValueHandlerTypes handlerTypes = this.validateUnaryValueHandler("@ModifyVariable",
+                point.mixinClassName, point.mixinMethodName, point.mixinMethodDesc);
+        if (handlerTypes == null) {
+            return false;
+        }
+        Type requestedType = this.optionalType(point.variableTypeDesc);
+        if (requestedType != null && !isSameStackValueType(handlerTypes.argumentType, requestedType)) {
+            this.reportInvalidHandler("@ModifyVariable", point.mixinClassName, point.mixinMethodName, point.mixinMethodDesc,
+                    "handler argument does not match requested variable type " + requestedType.getDescriptor());
+            return false;
+        }
+
+        String mixinInternal = point.mixinClassName.replace('.', '/');
+        InjectHandlerCall handlerCall = this.ensureTransformHandler("@ModifyVariable", "modifyVariable",
+                point.mixinClassName, point.mixinMethodName, point.mixinMethodDesc, point.mixinMethodStatic,
+                context, mixinInternal, (method.access & Opcodes.ACC_STATIC) == 0);
+        if (handlerCall == null) {
+            return false;
+        }
+
+        ArrayList<VariableInstruction> matches = new ArrayList<>();
+        for (AbstractInsnNode insn : method.instructions.toArray()) {
+            if (insn instanceof VarInsnNode varInsn) {
+                VariableInstruction variable = this.variableInstruction(varInsn);
+                if (variable != null && this.matchesModifyVariable(variable, point, handlerTypes.argumentType, requestedType)) {
+                    matches.add(variable);
+                }
+            }
+        }
+        List<VariableInstruction> selected = this.selectOrdinal(matches, point.ordinal);
+        for (VariableInstruction variable : selected) {
+            Type outputType = requestedType != null ? requestedType : variable.type;
+            InsnList invoke = this.valueHandlerInvocation(method, handlerCall, handlerTypes, outputType);
+            if (variable.store) {
+                method.instructions.insertBefore(variable.node, invoke);
+            } else {
+                method.instructions.insert(variable.node, invoke);
+            }
+        }
+        return !selected.isEmpty();
+    }
+
+    private boolean applyModifyArgsToMethod(MethodNode method, ModifyArgsPoint point,
+                                            InjectContext context) throws NoSuchMethodException, IOException {
+        if (!this.validateModifyArgsHandler(point)) {
+            return false;
+        }
+        String mixinInternal = point.mixinClassName.replace('.', '/');
+        InjectHandlerCall handlerCall = this.ensureTransformHandler("@ModifyArgs", "modifyArgs",
+                point.mixinClassName, point.mixinMethodName, point.mixinMethodDesc, point.mixinMethodStatic,
+                context, mixinInternal, (method.access & Opcodes.ACC_STATIC) == 0);
+        if (handlerCall == null) {
+            return false;
+        }
+
+        ArrayList<MethodInsnNode> matches = new ArrayList<>();
+        for (AbstractInsnNode insn : method.instructions.toArray()) {
+            if (insn instanceof MethodInsnNode methodInsn && this.matchesModifyArgsCall(methodInsn, point)) {
+                matches.add(methodInsn);
+            }
+        }
+        List<MethodInsnNode> selected = this.selectOrdinal(matches, point.ordinal);
+        for (MethodInsnNode methodInsn : selected) {
+            method.instructions.insertBefore(methodInsn, this.modifyArgsInvocation(method, methodInsn, handlerCall));
+        }
+        return !selected.isEmpty();
+    }
+
+    private boolean matchesModifyConstant(ConstantInstruction constant, ModifyConstantPoint point,
+                                          Type handlerArgType, Type requestedType) {
+        return matchesOpcode(constant.node.getOpcode(), point.opcode)
+                && this.matchesConstantValue(constant.value, point.constantValue)
+                && isConstantTypeCompatible(constant.value, constant.type, requestedType != null ? requestedType : handlerArgType);
+    }
+
+    private static boolean isConstantTypeCompatible(Object value, Type constantType, Type expectedType) {
+        if (value == null && isReferenceType(expectedType)) {
+            return true;
+        }
+        if (isIntLikeType(constantType) && isIntLikeType(expectedType)) {
+            return true;
+        }
+        if (isReferenceType(constantType) && isReferenceType(expectedType)) {
+            return "Ljava/lang/Object;".equals(expectedType.getDescriptor())
+                    || constantType.getDescriptor().equals(expectedType.getDescriptor());
+        }
+        return constantType.getSort() == expectedType.getSort();
+    }
+
+    private boolean matchesModifyVariable(VariableInstruction variable, ModifyVariablePoint point,
+                                          Type handlerArgType, Type requestedType) {
+        if (!matchesOpcode(variable.node.getOpcode(), point.opcode)) {
+            return false;
+        }
+        if (point.variableIndex >= 0 && point.variableIndex != variable.node.var) {
+            return false;
+        }
+        if ((variable.load && !point.load) || (variable.store && !point.store)) {
+            return false;
+        }
+        return isSameStackValueType(variable.type, requestedType != null ? requestedType : handlerArgType);
+    }
+
+    private boolean matchesModifyArgsCall(MethodInsnNode methodInsn, ModifyArgsPoint point) {
+        if (!matchesOpcode(methodInsn.getOpcode(), point.opcode)) {
+            return false;
+        }
+        for (TargetCall targetCall : point.targetCalls) {
+            if (targetCall.matches(methodInsn.owner, methodInsn.name, methodInsn.desc)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private ConstantInstruction constantInstruction(AbstractInsnNode insn) {
+        int opcode = insn.getOpcode();
+        return switch (opcode) {
+            case Opcodes.ACONST_NULL -> new ConstantInstruction(insn, null, Type.getType("Ljava/lang/Object;"));
+            case Opcodes.ICONST_M1 -> new ConstantInstruction(insn, -1, Type.INT_TYPE);
+            case Opcodes.ICONST_0 -> new ConstantInstruction(insn, 0, Type.INT_TYPE);
+            case Opcodes.ICONST_1 -> new ConstantInstruction(insn, 1, Type.INT_TYPE);
+            case Opcodes.ICONST_2 -> new ConstantInstruction(insn, 2, Type.INT_TYPE);
+            case Opcodes.ICONST_3 -> new ConstantInstruction(insn, 3, Type.INT_TYPE);
+            case Opcodes.ICONST_4 -> new ConstantInstruction(insn, 4, Type.INT_TYPE);
+            case Opcodes.ICONST_5 -> new ConstantInstruction(insn, 5, Type.INT_TYPE);
+            case Opcodes.LCONST_0 -> new ConstantInstruction(insn, 0L, Type.LONG_TYPE);
+            case Opcodes.LCONST_1 -> new ConstantInstruction(insn, 1L, Type.LONG_TYPE);
+            case Opcodes.FCONST_0 -> new ConstantInstruction(insn, 0.0F, Type.FLOAT_TYPE);
+            case Opcodes.FCONST_1 -> new ConstantInstruction(insn, 1.0F, Type.FLOAT_TYPE);
+            case Opcodes.FCONST_2 -> new ConstantInstruction(insn, 2.0F, Type.FLOAT_TYPE);
+            case Opcodes.DCONST_0 -> new ConstantInstruction(insn, 0.0D, Type.DOUBLE_TYPE);
+            case Opcodes.DCONST_1 -> new ConstantInstruction(insn, 1.0D, Type.DOUBLE_TYPE);
+            case Opcodes.BIPUSH, Opcodes.SIPUSH -> new ConstantInstruction(insn, ((IntInsnNode) insn).operand, Type.INT_TYPE);
+            case Opcodes.LDC -> this.ldcConstantInstruction((LdcInsnNode) insn);
+            default -> null;
+        };
+    }
+
+    private ConstantInstruction ldcConstantInstruction(LdcInsnNode insn) {
+        Object value = insn.cst;
+        if (value instanceof Integer) {
+            return new ConstantInstruction(insn, value, Type.INT_TYPE);
+        }
+        if (value instanceof Long) {
+            return new ConstantInstruction(insn, value, Type.LONG_TYPE);
+        }
+        if (value instanceof Float) {
+            return new ConstantInstruction(insn, value, Type.FLOAT_TYPE);
+        }
+        if (value instanceof Double) {
+            return new ConstantInstruction(insn, value, Type.DOUBLE_TYPE);
+        }
+        if (value instanceof String) {
+            return new ConstantInstruction(insn, value, Type.getType("Ljava/lang/String;"));
+        }
+        if (value instanceof Type) {
+            return new ConstantInstruction(insn, value, Type.getType("Ljava/lang/Class;"));
+        }
+        return null;
+    }
+
+    private boolean matchesConstantValue(Object value, String expected) {
+        if (expected == null || expected.isEmpty()) {
+            return true;
+        }
+        if (value == null) {
+            return "null".equals(expected);
+        }
+        if (value instanceof Type type) {
+            return expected.equals(type.getDescriptor())
+                    || expected.equals(type.getInternalName())
+                    || expected.equals(type.getClassName());
+        }
+        return expected.equals(String.valueOf(value));
+    }
+
+    private VariableInstruction variableInstruction(VarInsnNode varInsn) {
+        int opcode = varInsn.getOpcode();
+        return switch (opcode) {
+            case Opcodes.ILOAD -> new VariableInstruction(varInsn, Type.INT_TYPE, true, false);
+            case Opcodes.LLOAD -> new VariableInstruction(varInsn, Type.LONG_TYPE, true, false);
+            case Opcodes.FLOAD -> new VariableInstruction(varInsn, Type.FLOAT_TYPE, true, false);
+            case Opcodes.DLOAD -> new VariableInstruction(varInsn, Type.DOUBLE_TYPE, true, false);
+            case Opcodes.ALOAD -> new VariableInstruction(varInsn, Type.getType("Ljava/lang/Object;"), true, false);
+            case Opcodes.ISTORE -> new VariableInstruction(varInsn, Type.INT_TYPE, false, true);
+            case Opcodes.LSTORE -> new VariableInstruction(varInsn, Type.LONG_TYPE, false, true);
+            case Opcodes.FSTORE -> new VariableInstruction(varInsn, Type.FLOAT_TYPE, false, true);
+            case Opcodes.DSTORE -> new VariableInstruction(varInsn, Type.DOUBLE_TYPE, false, true);
+            case Opcodes.ASTORE -> new VariableInstruction(varInsn, Type.getType("Ljava/lang/Object;"), false, true);
+            default -> null;
+        };
+    }
+
+    private InsnList valueHandlerInvocation(MethodNode method, InjectHandlerCall handlerCall,
+                                            ValueHandlerTypes handlerTypes, Type outputType) {
+        InsnList invoke = new InsnList();
+        if (handlerCall.needsReceiver) {
+            int tempLocal = this.allocateLocal(method, handlerTypes.argumentType);
+            invoke.add(this.getStoreInsn(handlerTypes.argumentType, tempLocal));
+            invoke.add(new VarInsnNode(Opcodes.ALOAD, 0));
+            invoke.add(this.getLoadInsn(handlerTypes.argumentType, tempLocal));
+        }
+        invoke.add(new MethodInsnNode(handlerCall.opcode, handlerCall.owner, handlerCall.name,
+                handlerCall.desc, handlerCall.isInterface));
+        this.appendReferenceCast(invoke, handlerTypes.returnType, outputType);
+        return invoke;
+    }
+
+    private InsnList modifyArgsInvocation(MethodNode method, MethodInsnNode methodInsn, InjectHandlerCall handlerCall) {
+        InsnList replacement = new InsnList();
+        Type[] argTypes = Type.getArgumentTypes(methodInsn.desc);
+        int[] argLocals = new int[argTypes.length];
+        for (int i = argTypes.length - 1; i >= 0; i--) {
+            argLocals[i] = this.allocateLocal(method, argTypes[i]);
+            replacement.add(this.getStoreInsn(argTypes[i], argLocals[i]));
+        }
+
+        boolean invokeStatic = methodInsn.getOpcode() == Opcodes.INVOKESTATIC;
+        int receiverLocal = -1;
+        if (!invokeStatic) {
+            receiverLocal = this.allocateLocal(method, Type.getType("Ljava/lang/Object;"));
+            replacement.add(new VarInsnNode(Opcodes.ASTORE, receiverLocal));
+        }
+
+        int arrayLocal = this.allocateLocal(method, Type.getType("[Ljava/lang/Object;"));
+        replacement.add(pushIntConstant(argTypes.length));
+        replacement.add(new TypeInsnNode(Opcodes.ANEWARRAY, "java/lang/Object"));
+        replacement.add(new VarInsnNode(Opcodes.ASTORE, arrayLocal));
+        for (int i = 0; i < argTypes.length; i++) {
+            replacement.add(new VarInsnNode(Opcodes.ALOAD, arrayLocal));
+            replacement.add(pushIntConstant(i));
+            replacement.add(this.getLoadInsn(argTypes[i], argLocals[i]));
+            this.appendBox(replacement, argTypes[i]);
+            replacement.add(new InsnNode(Opcodes.AASTORE));
+        }
+
+        int argsLocal = this.allocateLocal(method, Type.getObjectType(MixinConstants.ARGS_CLASS));
+        replacement.add(new TypeInsnNode(Opcodes.NEW, MixinConstants.ARGS_CLASS));
+        replacement.add(new InsnNode(Opcodes.DUP));
+        replacement.add(new VarInsnNode(Opcodes.ALOAD, arrayLocal));
+        replacement.add(new MethodInsnNode(Opcodes.INVOKESPECIAL, MixinConstants.ARGS_CLASS,
+                "<init>", "([Ljava/lang/Object;)V", false));
+        replacement.add(new VarInsnNode(Opcodes.ASTORE, argsLocal));
+
+        if (handlerCall.needsReceiver) {
+            replacement.add(new VarInsnNode(Opcodes.ALOAD, 0));
+        }
+        replacement.add(new VarInsnNode(Opcodes.ALOAD, argsLocal));
+        replacement.add(new MethodInsnNode(handlerCall.opcode, handlerCall.owner, handlerCall.name,
+                handlerCall.desc, handlerCall.isInterface));
+
+        if (!invokeStatic) {
+            replacement.add(new VarInsnNode(Opcodes.ALOAD, receiverLocal));
+        }
+        for (int i = 0; i < argTypes.length; i++) {
+            replacement.add(new VarInsnNode(Opcodes.ALOAD, argsLocal));
+            replacement.add(pushIntConstant(i));
+            replacement.add(new MethodInsnNode(Opcodes.INVOKEVIRTUAL, MixinConstants.ARGS_CLASS,
+                    "get", "(I)Ljava/lang/Object;", false));
+            this.appendUnboxOrCast(replacement, argTypes[i]);
+        }
+        return replacement;
+    }
+
+    private InjectHandlerCall ensureTransformHandler(String annotationName, String prefix,
+                                                     String mixinClassName, String mixinMethodName,
+                                                     String mixinMethodDesc, boolean mixinMethodStatic,
+                                                     InjectContext context, String mixinInternal,
+                                                     boolean targetIsInstance) throws NoSuchMethodException, IOException {
+        if (!mixinMethodStatic && !targetIsInstance) {
+            this.reportInvalidHandler(annotationName, mixinClassName, mixinMethodName, mixinMethodDesc,
+                    "non-static handler cannot be called from a static target method");
+            return null;
+        }
+
+        String key = prefix + '\n' + mixinClassName + '\n' + mixinMethodName + mixinMethodDesc + '\n' + mixinMethodStatic;
+        InjectHandlerCall existing = context.injectionState.handlerCalls.get(key);
+        if (existing != null) {
+            return existing;
+        }
+
+        MethodNode mixinMethod = context.holder.rewrittenMethodCache.get(mixinMethodName + mixinMethodDesc);
+        if (mixinMethod == null) {
+            throw new NoSuchMethodException("Cannot find " + annotationName + " handler: " + mixinMethodName + mixinMethodDesc);
+        }
+
+        MethodNode handler = context.holder.cloneMethod(mixinMethod);
+        this.rewriteSelfReferences(handler, new SelfRewriteContext(mixinInternal, context.actualClassName,
+                context.holder.shadowFields, context.holder.shadowMethods));
+        handler.name = this.uniqueTransformHandlerName(prefix, mixinClassName, mixinMethodName, mixinMethodDesc,
+                handler.desc, context.classNode, context.injectionState.methodsToAdd);
+        handler.access = handler.access & ~(Opcodes.ACC_PUBLIC | Opcodes.ACC_PROTECTED | Opcodes.ACC_ABSTRACT | Opcodes.ACC_NATIVE);
+        handler.access = (handler.access | Opcodes.ACC_PRIVATE | Opcodes.ACC_SYNTHETIC);
+        if (mixinMethodStatic) {
+            handler.access |= Opcodes.ACC_STATIC;
+        } else {
+            handler.access &= ~Opcodes.ACC_STATIC;
+        }
+        handler.visibleAnnotations = null;
+        handler.invisibleAnnotations = null;
+        handler.visibleParameterAnnotations = null;
+        handler.invisibleParameterAnnotations = null;
+        context.injectionState.methodsToAdd.add(handler);
+        this.copyLambdaMethods(mixinClassName, mixinMethodName,
+                new MixinCopyContext(context.classNode, context.holder, context.actualClassName, mixinInternal,
+                        context.injectionState.methodsToAdd));
+
+        InjectHandlerCall call = new InjectHandlerCall(
+                mixinMethodStatic ? Opcodes.INVOKESTATIC : Opcodes.INVOKESPECIAL,
+                context.actualClassName,
+                handler.name,
+                handler.desc,
+                (context.classNode.access & Opcodes.ACC_INTERFACE) != 0,
+                !mixinMethodStatic);
+        putValue(context.injectionState.handlerCalls, key, call);
+        return call;
+    }
+
+    private String uniqueTransformHandlerName(String prefix, String mixinClassName, String mixinMethodName,
+                                              String mixinMethodDesc, String methodDesc, ClassNode targetClass,
+                                              List<MethodNode> methodsToAdd) {
+        String baseName = "sera$" + prefix + "$" + sanitizeMethodName(mixinMethodName) + "$"
+                + Integer.toHexString(Objects.hash(prefix, mixinClassName, mixinMethodName, mixinMethodDesc));
+        String candidate = baseName;
+        int suffix = 0;
+        while (this.hasMethod(targetClass, methodsToAdd, candidate, methodDesc)) {
+            suffix++;
+            candidate = baseName + "$" + suffix;
+        }
+        return candidate;
+    }
+
+    private ValueHandlerTypes validateUnaryValueHandler(String annotationName, String mixinClassName,
+                                                        String methodName, String methodDesc) {
+        Type methodType = Type.getMethodType(methodDesc);
+        Type[] args = methodType.getArgumentTypes();
+        Type returnType = methodType.getReturnType();
+        if (args.length != 1) {
+            this.reportInvalidHandler(annotationName, mixinClassName, methodName, methodDesc,
+                    "handler must accept exactly one argument");
+            return null;
+        }
+        if (returnType.getSort() == Type.VOID) {
+            this.reportInvalidHandler(annotationName, mixinClassName, methodName, methodDesc,
+                    "handler must return the replacement value");
+            return null;
+        }
+        if (!isSameStackValueType(args[0], returnType)) {
+            this.reportInvalidHandler(annotationName, mixinClassName, methodName, methodDesc,
+                    "handler argument and return types must use the same JVM stack type");
+            return null;
+        }
+        return new ValueHandlerTypes(args[0], returnType);
+    }
+
+    private boolean validateModifyArgsHandler(ModifyArgsPoint point) {
+        Type methodType = Type.getMethodType(point.mixinMethodDesc);
+        Type[] args = methodType.getArgumentTypes();
+        Type returnType = methodType.getReturnType();
+        if (args.length == 1
+                && args[0].getSort() == Type.OBJECT
+                && MixinConstants.ARGS_CLASS.equals(args[0].getInternalName())
+                && returnType.getSort() == Type.VOID) {
+            return true;
+        }
+        this.reportInvalidHandler("@ModifyArgs", point.mixinClassName, point.mixinMethodName, point.mixinMethodDesc,
+                "handler must have descriptor (L" + MixinConstants.ARGS_CLASS + ";)V");
+        return false;
+    }
+
+    private void reportInvalidHandler(String annotationName, String mixinClassName, String methodName,
+                                      String methodDesc, String reason) {
+        System.err.println("[SeraMixin] Invalid " + annotationName + " handler "
+                + mixinClassName + "." + methodName + methodDesc + ": " + reason);
     }
 
     private static void appendPendingMethods(ClassNode classNode, List<MethodNode> methodsToAdd) {
@@ -926,7 +1395,7 @@ final class MixinTransformerEngine {
         return this.toInsertionPoints(this.selectOrdinal(matches, point.selector.ordinal), point, point.position.isBefore());
     }
 
-    private List<AbstractInsnNode> selectOrdinal(List<AbstractInsnNode> matches, int ordinal) {
+    private <T> List<T> selectOrdinal(List<T> matches, int ordinal) {
         if (ordinal < 0) {
             return matches;
         }
@@ -999,6 +1468,10 @@ final class MixinTransformerEngine {
 
     private static boolean matchesOpcode(int opcode, InjectionSelector selector) {
         return selector.opcode < 0 || selector.opcode == opcode;
+    }
+
+    private static boolean matchesOpcode(int opcode, int expectedOpcode) {
+        return expectedOpcode < 0 || expectedOpcode == opcode;
     }
 
     private static boolean matchesText(String expected, String actual) {
@@ -1188,8 +1661,55 @@ final class MixinTransformerEngine {
         return bridgeType.getSort() == targetType.getSort();
     }
 
+    private static boolean isSameStackValueType(Type first, Type second) {
+        if (first == null || second == null) {
+            return false;
+        }
+        if (first.getSort() == Type.VOID || second.getSort() == Type.VOID) {
+            return first.getSort() == second.getSort();
+        }
+        if (isIntLikeType(first) && isIntLikeType(second)) {
+            return true;
+        }
+        if (isReferenceType(first) && isReferenceType(second)) {
+            return true;
+        }
+        return first.getSort() == second.getSort();
+    }
+
+    private static boolean isIntLikeType(Type type) {
+        return switch (type.getSort()) {
+            case Type.BOOLEAN, Type.CHAR, Type.BYTE, Type.SHORT, Type.INT -> true;
+            default -> false;
+        };
+    }
+
     private static boolean isReferenceType(Type type) {
         return type.getSort() == Type.OBJECT || type.getSort() == Type.ARRAY;
+    }
+
+    private Type optionalType(String desc) {
+        if (desc == null || desc.isEmpty() || "V".equals(desc)) {
+            return null;
+        }
+        return Type.getType(desc);
+    }
+
+    private static AbstractInsnNode pushIntConstant(int value) {
+        if (value >= -1 && value <= 5) {
+            return new InsnNode(Opcodes.ICONST_0 + value);
+        }
+        if (value >= Byte.MIN_VALUE && value <= Byte.MAX_VALUE) {
+            return new IntInsnNode(Opcodes.BIPUSH, value);
+        }
+        if (value >= Short.MIN_VALUE && value <= Short.MAX_VALUE) {
+            return new IntInsnNode(Opcodes.SIPUSH, value);
+        }
+        return new LdcInsnNode(value);
+    }
+
+    private static String checkCastDescriptor(Type type) {
+        return type.getSort() == Type.ARRAY ? type.getDescriptor() : type.getInternalName();
     }
 
     private void reportInvalidBridge(String annotationName, String methodName, String methodDesc, String reason) {
@@ -1339,6 +1859,22 @@ final class MixinTransformerEngine {
         };
     }
 
+    private AbstractInsnNode getStoreInsn(Type type, int index) {
+        return switch (type.getSort()) {
+            case Type.BOOLEAN, Type.CHAR, Type.BYTE, Type.SHORT, Type.INT -> new VarInsnNode(Opcodes.ISTORE, index);
+            case Type.LONG -> new VarInsnNode(Opcodes.LSTORE, index);
+            case Type.FLOAT -> new VarInsnNode(Opcodes.FSTORE, index);
+            case Type.DOUBLE -> new VarInsnNode(Opcodes.DSTORE, index);
+            default -> new VarInsnNode(Opcodes.ASTORE, index);
+        };
+    }
+
+    private int allocateLocal(MethodNode method, Type type) {
+        int local = Math.max(method.maxLocals, 0);
+        method.maxLocals = local + type.getSize();
+        return local;
+    }
+
     private AbstractInsnNode getDefaultInsn(Type type) {
         return switch (type.getSort()) {
             case Type.BOOLEAN, Type.CHAR, Type.BYTE, Type.SHORT, Type.INT -> new InsnNode(Opcodes.ICONST_0);
@@ -1347,6 +1883,85 @@ final class MixinTransformerEngine {
             case Type.DOUBLE -> new InsnNode(Opcodes.DCONST_0);
             default -> new InsnNode(Opcodes.ACONST_NULL);
         };
+    }
+
+    private void appendBox(InsnList list, Type type) {
+        switch (type.getSort()) {
+            case Type.BOOLEAN -> list.add(new MethodInsnNode(Opcodes.INVOKESTATIC,
+                    "java/lang/Boolean", "valueOf", "(Z)Ljava/lang/Boolean;", false));
+            case Type.CHAR -> list.add(new MethodInsnNode(Opcodes.INVOKESTATIC,
+                    "java/lang/Character", "valueOf", "(C)Ljava/lang/Character;", false));
+            case Type.BYTE -> list.add(new MethodInsnNode(Opcodes.INVOKESTATIC,
+                    "java/lang/Byte", "valueOf", "(B)Ljava/lang/Byte;", false));
+            case Type.SHORT -> list.add(new MethodInsnNode(Opcodes.INVOKESTATIC,
+                    "java/lang/Short", "valueOf", "(S)Ljava/lang/Short;", false));
+            case Type.INT -> list.add(new MethodInsnNode(Opcodes.INVOKESTATIC,
+                    "java/lang/Integer", "valueOf", "(I)Ljava/lang/Integer;", false));
+            case Type.LONG -> list.add(new MethodInsnNode(Opcodes.INVOKESTATIC,
+                    "java/lang/Long", "valueOf", "(J)Ljava/lang/Long;", false));
+            case Type.FLOAT -> list.add(new MethodInsnNode(Opcodes.INVOKESTATIC,
+                    "java/lang/Float", "valueOf", "(F)Ljava/lang/Float;", false));
+            case Type.DOUBLE -> list.add(new MethodInsnNode(Opcodes.INVOKESTATIC,
+                    "java/lang/Double", "valueOf", "(D)Ljava/lang/Double;", false));
+            default -> {
+            }
+        }
+    }
+
+    private void appendUnboxOrCast(InsnList list, Type type) {
+        switch (type.getSort()) {
+            case Type.BOOLEAN -> {
+                list.add(new TypeInsnNode(Opcodes.CHECKCAST, "java/lang/Boolean"));
+                list.add(new MethodInsnNode(Opcodes.INVOKEVIRTUAL, "java/lang/Boolean", "booleanValue", "()Z", false));
+            }
+            case Type.CHAR -> {
+                list.add(new TypeInsnNode(Opcodes.CHECKCAST, "java/lang/Character"));
+                list.add(new MethodInsnNode(Opcodes.INVOKEVIRTUAL, "java/lang/Character", "charValue", "()C", false));
+            }
+            case Type.BYTE -> {
+                list.add(new TypeInsnNode(Opcodes.CHECKCAST, "java/lang/Byte"));
+                list.add(new MethodInsnNode(Opcodes.INVOKEVIRTUAL, "java/lang/Byte", "byteValue", "()B", false));
+            }
+            case Type.SHORT -> {
+                list.add(new TypeInsnNode(Opcodes.CHECKCAST, "java/lang/Short"));
+                list.add(new MethodInsnNode(Opcodes.INVOKEVIRTUAL, "java/lang/Short", "shortValue", "()S", false));
+            }
+            case Type.INT -> {
+                list.add(new TypeInsnNode(Opcodes.CHECKCAST, "java/lang/Integer"));
+                list.add(new MethodInsnNode(Opcodes.INVOKEVIRTUAL, "java/lang/Integer", "intValue", "()I", false));
+            }
+            case Type.LONG -> {
+                list.add(new TypeInsnNode(Opcodes.CHECKCAST, "java/lang/Long"));
+                list.add(new MethodInsnNode(Opcodes.INVOKEVIRTUAL, "java/lang/Long", "longValue", "()J", false));
+            }
+            case Type.FLOAT -> {
+                list.add(new TypeInsnNode(Opcodes.CHECKCAST, "java/lang/Float"));
+                list.add(new MethodInsnNode(Opcodes.INVOKEVIRTUAL, "java/lang/Float", "floatValue", "()F", false));
+            }
+            case Type.DOUBLE -> {
+                list.add(new TypeInsnNode(Opcodes.CHECKCAST, "java/lang/Double"));
+                list.add(new MethodInsnNode(Opcodes.INVOKEVIRTUAL, "java/lang/Double", "doubleValue", "()D", false));
+            }
+            case Type.OBJECT -> {
+                if (!"java/lang/Object".equals(type.getInternalName())) {
+                    list.add(new TypeInsnNode(Opcodes.CHECKCAST, type.getInternalName()));
+                }
+            }
+            case Type.ARRAY -> list.add(new TypeInsnNode(Opcodes.CHECKCAST, type.getDescriptor()));
+            default -> {
+            }
+        }
+    }
+
+    private void appendReferenceCast(InsnList list, Type returnType, Type outputType) {
+        if (outputType == null || !isReferenceType(outputType) || !isReferenceType(returnType)) {
+            return;
+        }
+        if (outputType.getDescriptor().equals(returnType.getDescriptor())
+                || "Ljava/lang/Object;".equals(outputType.getDescriptor())) {
+            return;
+        }
+        list.add(new TypeInsnNode(Opcodes.CHECKCAST, checkCastDescriptor(outputType)));
     }
 
     private InsnList unboxAndReturn(Type type) {
@@ -1464,6 +2079,15 @@ final class MixinTransformerEngine {
     }
 
     private record ResolvedInjectionPoint(AbstractInsnNode node, boolean before) {
+    }
+
+    private record ConstantInstruction(AbstractInsnNode node, Object value, Type type) {
+    }
+
+    private record VariableInstruction(VarInsnNode node, Type type, boolean load, boolean store) {
+    }
+
+    private record ValueHandlerTypes(Type argumentType, Type returnType) {
     }
 
     private static final class InjectionState {

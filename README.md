@@ -275,6 +275,43 @@ boolean changed = access.sera$invokeRecalculate("main");
 如果访问静态字段或静态方法，可设置 `isStatic = true`。`value` 为空时会从 `getX`、`isX`、`setX`、`invokeX`、`callX`
 等方法名推断目标成员名，但更建议显式填写目标名。
 
+### 6. 修改常量、调用参数和局部变量
+
+`@ModifyConstant` handler 形如 `(T value)T`，会把匹配到的常量替换为 handler 返回值。
+
+```java
+@ModifyConstant(methodName = {"getLimit"}, desc = "()I", constant = "10")
+private int modifyLimit(int value) {
+    return 20;
+}
+```
+
+`@ModifyArgs` handler 形如 `(Args args)V`，在目标调用发生前修改参数。
+
+```java
+@ModifyArgs(
+        methodName = {"renderName"},
+        methodDesc = "(Ljava/lang/String;)V",
+        targetMethod = {"com.example.Renderer.draw"},
+        targetMethodDesc = "(Ljava/lang/String;I)V"
+)
+private void modifyDrawArgs(Args args) {
+    args.set(0, "[Sera] " + args.<String>get(0));
+    args.set(1, 0xFFFFFF);
+}
+```
+
+`@ModifyVariable` handler 形如 `(T value)T`，可以按本地变量索引、opcode、ordinal 过滤 load/store 指令。
+
+```java
+@ModifyVariable(methodName = {"tick"}, desc = "()V", index = 1, store = true, load = false)
+private float clampSpeed(float speed) {
+    return Math.min(speed, 1.0F);
+}
+```
+
+这三个注解都支持私有实例 handler；当目标方法是静态方法时，handler 必须是 `static`。
+
 ## 注解速查
 
 | 注解 | 作用 | 备注 |
@@ -283,6 +320,9 @@ boolean changed = access.sera$invokeRecalculate("main");
 | `@Inject(methodName, desc, at)` | 在目标方法或目标指令附近插入 handler | 支持 `HEAD`、`TAIL`、`RETURN`、`INVOKE`、`FIELD`、`NEW`、`JUMP`、`CUSTOM` |
 | `@Overwrite(methodName, desc)` | 用 Mixin 方法体替换目标方法体 | 谨慎使用，冲突风险较高 |
 | `@Redirect(methodName, methodDesc, targetMethod, targetMethodDesc)` | 把目标方法中的指定调用重定向到 handler | handler 需要匹配调用参数/返回值 |
+| `@ModifyConstant(methodName, desc, constant)` | 把匹配常量交给 handler 返回替换值 | handler 形如 `(T)T`，可用 `type`、`ordinal`、`opcode` 过滤 |
+| `@ModifyArgs(methodName, methodDesc, targetMethod, targetMethodDesc)` | 在目标调用前修改参数 | handler 形如 `(Args)V` |
+| `@ModifyVariable(methodName, desc, index)` | 修改局部变量 load/store 值 | handler 形如 `(T)T`，可用 `type`、`ordinal`、`opcode` 过滤 |
 | `@ReturnField(field, type, isStatic, read, write)` | 拦截指定字段读写，并经由 public static handler 返回新值 | 实例字段 handler 形如 `(Target self, T value)T`，静态字段 handler 形如 `(T value)T` |
 | `@Shadow("targetName")` | 把 Mixin 内字段/方法引用改写为目标类字段/方法 | `value` 为空时使用同名成员 |
 | `@Accessor("fieldName")` | 为目标字段生成 getter 或 setter | getter 无参数非 `void`，setter 单参数返回 `void`；静态字段设置 `isStatic = true` |

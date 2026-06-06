@@ -232,6 +232,106 @@ final class RedirectPoint {
     }
 }
 
+final class ModifyConstantPoint {
+    final String targetMethodName;
+    final String targetMethodDesc;
+    final String mixinClassName;
+    final String mixinMethodName;
+    final String mixinMethodDesc;
+    final boolean mixinMethodStatic;
+    final String constantValue;
+    final String constantTypeDesc;
+    final int ordinal;
+    final int opcode;
+
+    ModifyConstantPoint(String targetMethodName, String targetMethodDesc,
+                        String mixinClassName, String mixinMethodName, String mixinMethodDesc,
+                        boolean mixinMethodStatic, String constantValue, String constantTypeDesc,
+                        int ordinal, int opcode) {
+        this.targetMethodName = targetMethodName;
+        this.targetMethodDesc = targetMethodDesc;
+        this.mixinClassName = mixinClassName;
+        this.mixinMethodName = mixinMethodName;
+        this.mixinMethodDesc = mixinMethodDesc;
+        this.mixinMethodStatic = mixinMethodStatic;
+        this.constantValue = constantValue == null ? "" : constantValue;
+        this.constantTypeDesc = constantTypeDesc == null ? "V" : constantTypeDesc;
+        this.ordinal = ordinal;
+        this.opcode = opcode;
+    }
+
+    boolean matches(String name, String desc) {
+        return this.targetMethodName.equals(name) && this.targetMethodDesc.equals(desc);
+    }
+}
+
+final class ModifyVariablePoint {
+    final String targetMethodName;
+    final String targetMethodDesc;
+    final String mixinClassName;
+    final String mixinMethodName;
+    final String mixinMethodDesc;
+    final boolean mixinMethodStatic;
+    final int variableIndex;
+    final String variableTypeDesc;
+    final int ordinal;
+    final int opcode;
+    final boolean load;
+    final boolean store;
+
+    ModifyVariablePoint(String targetMethodName, String targetMethodDesc,
+                        String mixinClassName, String mixinMethodName, String mixinMethodDesc,
+                        boolean mixinMethodStatic, int variableIndex, String variableTypeDesc,
+                        int ordinal, int opcode, boolean load, boolean store) {
+        this.targetMethodName = targetMethodName;
+        this.targetMethodDesc = targetMethodDesc;
+        this.mixinClassName = mixinClassName;
+        this.mixinMethodName = mixinMethodName;
+        this.mixinMethodDesc = mixinMethodDesc;
+        this.mixinMethodStatic = mixinMethodStatic;
+        this.variableIndex = variableIndex;
+        this.variableTypeDesc = variableTypeDesc == null ? "V" : variableTypeDesc;
+        this.ordinal = ordinal;
+        this.opcode = opcode;
+        this.load = load;
+        this.store = store;
+    }
+
+    boolean matches(String name, String desc) {
+        return this.targetMethodName.equals(name) && this.targetMethodDesc.equals(desc);
+    }
+}
+
+final class ModifyArgsPoint {
+    final String targetMethodName;
+    final String targetMethodDesc;
+    final String mixinClassName;
+    final String mixinMethodName;
+    final String mixinMethodDesc;
+    final boolean mixinMethodStatic;
+    final List<TargetCall> targetCalls;
+    final int ordinal;
+    final int opcode;
+
+    ModifyArgsPoint(String targetMethodName, String targetMethodDesc,
+                    String mixinClassName, String mixinMethodName, String mixinMethodDesc,
+                    boolean mixinMethodStatic, List<TargetCall> targetCalls, int ordinal, int opcode) {
+        this.targetMethodName = targetMethodName;
+        this.targetMethodDesc = targetMethodDesc;
+        this.mixinClassName = mixinClassName;
+        this.mixinMethodName = mixinMethodName;
+        this.mixinMethodDesc = mixinMethodDesc;
+        this.mixinMethodStatic = mixinMethodStatic;
+        this.targetCalls = targetCalls;
+        this.ordinal = ordinal;
+        this.opcode = opcode;
+    }
+
+    boolean matches(String name, String desc) {
+        return this.targetMethodName.equals(name) && this.targetMethodDesc.equals(desc);
+    }
+}
+
 final class TargetCall {
     final String owner;
     final String name;

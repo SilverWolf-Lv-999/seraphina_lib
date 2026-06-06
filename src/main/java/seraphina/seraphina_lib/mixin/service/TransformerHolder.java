@@ -39,6 +39,9 @@ final class TransformerHolder {
     final List<InjectPoint> injectPoints = new ArrayList<>();
     final List<OverwritePoint> overwritePoints = new ArrayList<>();
     final List<RedirectPoint> redirectPoints = new ArrayList<>();
+    final List<ModifyConstantPoint> modifyConstantPoints = new ArrayList<>();
+    final List<ModifyArgsPoint> modifyArgsPoints = new ArrayList<>();
+    final List<ModifyVariablePoint> modifyVariablePoints = new ArrayList<>();
     final List<ReturnFieldPoint> returnFieldPoints = new ArrayList<>();
     final List<AccessorPoint> accessorPoints = new ArrayList<>();
     final List<InvokerPoint> invokerPoints = new ArrayList<>();
@@ -201,6 +204,18 @@ final class TransformerHolder {
         }
         if (MixinConstants.REDIRECT_CLASS.equals(desc)) {
             this.redirectPoints.addAll(this.readRedirectPoints(method, annotation, remap));
+            return;
+        }
+        if (MixinConstants.MODIFY_CONSTANT_CLASS.equals(desc)) {
+            this.modifyConstantPoints.addAll(this.readModifyConstantPoints(method, annotation, remap));
+            return;
+        }
+        if (MixinConstants.MODIFY_ARGS_CLASS.equals(desc)) {
+            this.modifyArgsPoints.addAll(this.readModifyArgsPoints(method, annotation, remap));
+            return;
+        }
+        if (MixinConstants.MODIFY_VARIABLE_CLASS.equals(desc)) {
+            this.modifyVariablePoints.addAll(this.readModifyVariablePoints(method, annotation, remap));
             return;
         }
         if (MixinConstants.OVERWRITE_CLASS.equals(desc)) {
@@ -580,6 +595,73 @@ final class TransformerHolder {
         return points;
     }
 
+    private List<ModifyConstantPoint> readModifyConstantPoints(MethodNode method, AnnotationNode annotation, boolean remap) {
+        List<String> methodNames = MixinAnnotationUtils.annotationStringListValue(annotation, "methodName");
+        String methodDesc = MixinAnnotationUtils.annotationStringValue(annotation, "desc", "");
+        String constant = MixinAnnotationUtils.annotationStringValue(annotation, "constant", "");
+        String constantTypeDesc = normalizeOptionalTypeDescriptor(MixinAnnotationUtils.annotationTypeDescriptorValue(annotation, "type"), remap);
+        int ordinal = MixinAnnotationUtils.annotationIntValue(annotation, "ordinal", -1);
+        int opcode = MixinAnnotationUtils.annotationIntValue(annotation, "opcode", -1);
+        boolean mixinMethodStatic = (method.access & Opcodes.ACC_STATIC) != 0;
+        ArrayList<ModifyConstantPoint> points = new ArrayList<>();
+        for (String methodName : methodNames) {
+            MappedMethod mapped = remap
+                    ? this.mappingResolver.mapMethod(this.targetInternalName, methodName, methodDesc)
+                    : new MappedMethod(methodName, methodDesc);
+            points.add(new ModifyConstantPoint(mapped.name(), mapped.desc(), this.mixinClassName, method.name, method.desc,
+                    mixinMethodStatic, constant, constantTypeDesc, ordinal, opcode));
+        }
+        return points;
+    }
+
+    private List<ModifyArgsPoint> readModifyArgsPoints(MethodNode method, AnnotationNode annotation, boolean remap) {
+        List<String> methodNames = MixinAnnotationUtils.annotationStringListValue(annotation, "methodName");
+        String methodDesc = MixinAnnotationUtils.annotationStringValue(annotation, "methodDesc", "");
+        List<String> targetMethods = MixinAnnotationUtils.annotationStringListValue(annotation, "targetMethod");
+        String targetMethodDesc = MixinAnnotationUtils.annotationStringValue(annotation, "targetMethodDesc", "");
+        List<TargetCall> targetCalls = this.getTargetCalls(targetMethods, targetMethodDesc, remap);
+        int ordinal = MixinAnnotationUtils.annotationIntValue(annotation, "ordinal", -1);
+        int opcode = MixinAnnotationUtils.annotationIntValue(annotation, "opcode", -1);
+        boolean mixinMethodStatic = (method.access & Opcodes.ACC_STATIC) != 0;
+        ArrayList<ModifyArgsPoint> points = new ArrayList<>();
+        for (String methodName : methodNames) {
+            MappedMethod mapped = remap
+                    ? this.mappingResolver.mapMethod(this.targetInternalName, methodName, methodDesc)
+                    : new MappedMethod(methodName, methodDesc);
+            points.add(new ModifyArgsPoint(mapped.name(), mapped.desc(), this.mixinClassName, method.name, method.desc,
+                    mixinMethodStatic, targetCalls, ordinal, opcode));
+        }
+        return points;
+    }
+
+    private List<ModifyVariablePoint> readModifyVariablePoints(MethodNode method, AnnotationNode annotation, boolean remap) {
+        List<String> methodNames = MixinAnnotationUtils.annotationStringListValue(annotation, "methodName");
+        String methodDesc = MixinAnnotationUtils.annotationStringValue(annotation, "desc", "");
+        int variableIndex = MixinAnnotationUtils.annotationIntValue(annotation, "index", -1);
+        String variableTypeDesc = normalizeOptionalTypeDescriptor(MixinAnnotationUtils.annotationTypeDescriptorValue(annotation, "type"), remap);
+        int ordinal = MixinAnnotationUtils.annotationIntValue(annotation, "ordinal", -1);
+        int opcode = MixinAnnotationUtils.annotationIntValue(annotation, "opcode", -1);
+        boolean load = MixinAnnotationUtils.annotationBooleanValue(annotation, "load", true);
+        boolean store = MixinAnnotationUtils.annotationBooleanValue(annotation, "store", true);
+        boolean mixinMethodStatic = (method.access & Opcodes.ACC_STATIC) != 0;
+        ArrayList<ModifyVariablePoint> points = new ArrayList<>();
+        for (String methodName : methodNames) {
+            MappedMethod mapped = remap
+                    ? this.mappingResolver.mapMethod(this.targetInternalName, methodName, methodDesc)
+                    : new MappedMethod(methodName, methodDesc);
+            points.add(new ModifyVariablePoint(mapped.name(), mapped.desc(), this.mixinClassName, method.name, method.desc,
+                    mixinMethodStatic, variableIndex, variableTypeDesc, ordinal, opcode, load, store));
+        }
+        return points;
+    }
+
+    private String normalizeOptionalTypeDescriptor(String desc, boolean remap) {
+        if (desc == null || desc.isEmpty() || "V".equals(desc)) {
+            return "V";
+        }
+        return remap ? this.mappingResolver.mapDescriptor(desc) : desc;
+    }
+
     private List<TargetCall> getTargetCalls(List<String> targetMethods, String targetMethodDesc, boolean remap) {
         ArrayList<TargetCall> targetCalls = new ArrayList<>();
         for (String targetMethod : targetMethods) {
@@ -860,6 +942,9 @@ final class TransformerHolder {
                 || MixinConstants.INJECT_POINT_CLASS.equals(desc)
                 || MixinConstants.ASM_CLASS.equals(desc)
                 || MixinConstants.REDIRECT_CLASS.equals(desc)
+                || MixinConstants.MODIFY_CONSTANT_CLASS.equals(desc)
+                || MixinConstants.MODIFY_ARGS_CLASS.equals(desc)
+                || MixinConstants.MODIFY_VARIABLE_CLASS.equals(desc)
                 || MixinConstants.OVERWRITE_CLASS.equals(desc);
     }
 
