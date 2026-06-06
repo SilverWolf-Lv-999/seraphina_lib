@@ -112,8 +112,8 @@ public class SeraMixinLaunchPluginService implements ILaunchPluginService {
             MixinTransformerEngine.fixMethodBounds(classNode);
             return ComputeFlags.COMPUTE_FRAMES;
         } catch (Throwable throwable) {
-            System.err.println("[SeraMixin] Failed to transform " + internalName + ": " + throwable.getMessage());
-            throwable.printStackTrace(System.err);
+            SeraMixinLogger.error("Failed to transform {}: {}", internalName, throwable.getMessage());
+            SeraMixinLogger.exception(throwable);
             return ComputeFlags.NO_REWRITE;
         } finally {
             clearThreadLocal(this.currentTargetClass);
@@ -320,8 +320,8 @@ public class SeraMixinLaunchPluginService implements ILaunchPluginService {
             return true;
         } catch (Throwable throwable) {
             this.serviceDiscovery.markDirty();
-            System.err.println("[SeraMixin] Mixin services are not ready yet: " + throwable);
-            throwable.printStackTrace(System.err);
+            SeraMixinLogger.error("Mixin services are not ready yet: {}", throwable);
+            SeraMixinLogger.exception(throwable);
             return false;
         }
     }
@@ -338,7 +338,7 @@ public class SeraMixinLaunchPluginService implements ILaunchPluginService {
             return;
         }
         String normalizedMixin = normalizeClassName(mixinClassName);
-        System.err.println("[SeraMixin] Missing @SeraMixin target on " + normalizedMixin);
+        SeraMixinLogger.warn("Missing @SeraMixin target on {}", normalizedMixin);
     }
 
     private boolean registerMixinIfAnnotatedFromASM(String mixinClassName, ClassLoader mixinClassLoader, ISeraMixin hook) {
@@ -366,7 +366,7 @@ public class SeraMixinLaunchPluginService implements ILaunchPluginService {
             }
         }
         if (registered == 0) {
-            System.err.println("[SeraMixin] No @SeraMixin classes found in package " + normalizedPackage);
+            SeraMixinLogger.warn("No @SeraMixin classes found in package {}", normalizedPackage);
         }
         return registered;
     }
@@ -381,7 +381,7 @@ public class SeraMixinLaunchPluginService implements ILaunchPluginService {
         try {
             mixinBytes = this.classProvider.loadMixinBytes(normalizedMixin, mixinClassLoader);
         } catch (IOException exception) {
-            System.err.println("[SeraMixin] Failed to read mixin bytes for " + normalizedMixin + ": " + exception.getMessage());
+            SeraMixinLogger.error("Failed to read mixin bytes for {}: {}", normalizedMixin, exception.getMessage());
             return null;
         }
 
@@ -389,7 +389,7 @@ public class SeraMixinLaunchPluginService implements ILaunchPluginService {
         try {
             new ClassReader(mixinBytes).accept(classNode, ClassReader.SKIP_CODE | ClassReader.SKIP_DEBUG | ClassReader.SKIP_FRAMES);
         } catch (Throwable throwable) {
-            System.err.println("[SeraMixin] Failed to parse mixin annotations for " + normalizedMixin + ": " + throwable.getMessage());
+            SeraMixinLogger.error("Failed to parse mixin annotations for {}: {}", normalizedMixin, throwable.getMessage());
             return null;
         }
 

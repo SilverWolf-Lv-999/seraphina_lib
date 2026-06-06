@@ -92,7 +92,7 @@ final class MixinClassProvider {
                 }
                 return bytes;
             } catch (Throwable throwable) {
-                System.err.println("[SeraMixin] Failed to read class bytes for " + internalName + ": " + throwable.getMessage());
+                SeraMixinLogger.error("Failed to read class bytes for {}: {}", internalName, throwable.getMessage());
             }
         }
 
@@ -183,7 +183,7 @@ final class MixinClassProvider {
                     this.scanPackageResource(resources.nextElement(), packagePath, classNames);
                 }
             } catch (IOException exception) {
-                System.err.println("[SeraMixin] Failed to scan package " + packagePath + ": " + exception.getMessage());
+                SeraMixinLogger.error("Failed to scan package {}: {}", packagePath, exception.getMessage());
             }
         }
     }
@@ -209,7 +209,7 @@ final class MixinClassProvider {
                 this.scanJarPackageResource(resource, packagePath, classNames);
                 return;
             } catch (IOException exception) {
-                System.err.println("[SeraMixin] Failed to scan jar package " + packagePath + ": " + exception.getMessage());
+                SeraMixinLogger.error("Failed to scan jar package {}: {}", packagePath, exception.getMessage());
             }
         }
         try {

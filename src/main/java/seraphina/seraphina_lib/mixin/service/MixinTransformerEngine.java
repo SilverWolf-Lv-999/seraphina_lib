@@ -129,8 +129,9 @@ final class MixinTransformerEngine {
                 }
                 changed |= this.applyTransform(classNode, holder, loader, actualClassName);
             } catch (Throwable throwable) {
-                System.err.println("[SeraMixin] Failed to apply " + info.mixinClassName + " to " + actualClassName + ": " + throwable.getMessage());
-                throwable.printStackTrace(System.err);
+                SeraMixinLogger.error("Failed to apply {} to {}: {}",
+                        info.mixinClassName, actualClassName, throwable.getMessage());
+                SeraMixinLogger.exception(throwable);
             }
         }
         return changed;
@@ -981,8 +982,8 @@ final class MixinTransformerEngine {
 
     private void reportInvalidHandler(String annotationName, String mixinClassName, String methodName,
                                       String methodDesc, String reason) {
-        System.err.println("[SeraMixin] Invalid " + annotationName + " handler "
-                + mixinClassName + "." + methodName + methodDesc + ": " + reason);
+        SeraMixinLogger.warn("Invalid {} handler {}.{}{}: {}",
+                annotationName, mixinClassName, methodName, methodDesc, reason);
     }
 
     private static void appendPendingMethods(ClassNode classNode, List<MethodNode> methodsToAdd) {
@@ -1525,9 +1526,13 @@ final class MixinTransformerEngine {
     }
 
     private void reportMissingInjectionPoint(MethodNode target, InjectPoint point) {
-        System.err.println("[SeraMixin] @Inject point not found: " + point.position + " in "
-                + target.name + target.desc + " for "
-                + point.mixinClassName + "." + point.mixinMethodName + point.mixinMethodDesc);
+        SeraMixinLogger.warn("@Inject point not found: {} in {}{} for {}.{}{}",
+                point.position,
+                target.name,
+                target.desc,
+                point.mixinClassName,
+                point.mixinMethodName,
+                point.mixinMethodDesc);
     }
 
     private static boolean isConstructor(MethodNode target) {
@@ -1713,8 +1718,7 @@ final class MixinTransformerEngine {
     }
 
     private void reportInvalidBridge(String annotationName, String methodName, String methodDesc, String reason) {
-        System.err.println("[SeraMixin] Invalid " + annotationName + " bridge "
-                + methodName + methodDesc + ": " + reason);
+        SeraMixinLogger.warn("Invalid {} bridge {}{}: {}", annotationName, methodName, methodDesc, reason);
     }
 
     private boolean hasField(ClassNode classNode, String name, String desc) {

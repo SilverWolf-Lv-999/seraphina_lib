@@ -140,7 +140,7 @@ final class MixinHierarchyResolver {
             this.hierarchyCache.put(internalName, info);
             return info;
         } catch (Throwable throwable) {
-            System.err.println("[SeraMixin] Failed to read hierarchy for " + internalName + ": " + throwable.getMessage());
+            SeraMixinLogger.error("Failed to read hierarchy for {}: {}", internalName, throwable.getMessage());
             return null;
         }
     }

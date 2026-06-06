@@ -51,12 +51,11 @@ final class MixinMappingManager {
             }
             MixinMappingResolver resolver = MixinMappingResolver.readMapping(mappingFile, mappingType);
             if (resolver.isEnabled()) {
-                System.out.println("[SeraMixin] Loaded mapping " + mappingFile.toAbsolutePath());
+                SeraMixinLogger.info("Loaded mapping {}", mappingFile.toAbsolutePath());
             }
             return resolver;
         } catch (Throwable throwable) {
-            System.err.println("[SeraMixin] Failed to load mapping for " + provider.getClass().getName()
-                    + ": " + throwable.getMessage());
+            SeraMixinLogger.error("Failed to load mapping for {}: {}", provider.getClass().getName(), throwable.getMessage());
             return MixinMappingResolver.EMPTY;
         }
     }
@@ -65,7 +64,7 @@ final class MixinMappingManager {
         String normalizedResourcePath = normalizeResourcePath(resourcePath);
         byte[] data = this.readResource(provider.getClass(), normalizedResourcePath);
         if (data == null) {
-            System.err.println("[SeraMixin] Mapping resource not found in jar: " + resourcePath);
+            SeraMixinLogger.warn("Mapping resource not found in jar: {}", resourcePath);
             return null;
         }
 
@@ -79,7 +78,7 @@ final class MixinMappingManager {
         }
         if (needWrite) {
             writeMappingFile(targetFile, data);
-            System.out.println("[SeraMixin] Extracted mapping -> " + targetFile.toAbsolutePath());
+            SeraMixinLogger.info("Extracted mapping -> {}", targetFile.toAbsolutePath());
         }
         return targetFile;
     }
@@ -152,8 +151,8 @@ final class MixinMappingManager {
         try {
             return provider.getMappingPath();
         } catch (Throwable throwable) {
-            System.err.println("[SeraMixin] ISeraMixin.getMappingPath failed for "
-                    + provider.getClass().getName() + ": " + throwable.getMessage());
+            SeraMixinLogger.error("ISeraMixin.getMappingPath failed for {}: {}",
+                    provider.getClass().getName(), throwable.getMessage());
             return "";
         }
     }
@@ -163,8 +162,8 @@ final class MixinMappingManager {
             String mappingType = provider.getMappingType();
             return mappingType == null || mappingType.isBlank() ? "srg" : mappingType;
         } catch (Throwable throwable) {
-            System.err.println("[SeraMixin] ISeraMixin.getMappingType failed for "
-                    + provider.getClass().getName() + ": " + throwable.getMessage());
+            SeraMixinLogger.error("ISeraMixin.getMappingType failed for {}: {}",
+                    provider.getClass().getName(), throwable.getMessage());
             return "srg";
         }
     }

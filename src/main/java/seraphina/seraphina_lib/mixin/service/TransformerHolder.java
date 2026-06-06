@@ -284,8 +284,8 @@ final class TransformerHolder {
             targetMethodName = inferInvokerTargetName(method.name);
         }
         if ("<init>".equals(targetMethodName)) {
-            System.err.println("[SeraMixin] @Invoker does not support constructor invokers yet: "
-                    + this.mixinClassName + "." + method.name + method.desc);
+            SeraMixinLogger.warn("@Invoker does not support constructor invokers yet: {}.{}{}",
+                    this.mixinClassName, method.name, method.desc);
             return;
         }
         String targetMethodDesc = MixinAnnotationUtils.annotationStringValue(annotation, "desc", method.desc);
@@ -575,8 +575,8 @@ final class TransformerHolder {
     }
 
     private void reportUnsupportedASMHandler(MethodNode method) {
-        System.err.println("[SeraMixin] @ASM handler is ignored because invoking it would load the mixin class: "
-                + this.mixinClassName + "." + method.name + method.desc);
+        SeraMixinLogger.warn("@ASM handler is ignored because invoking it would load the mixin class: {}.{}{}",
+                this.mixinClassName, method.name, method.desc);
     }
 
     private List<RedirectPoint> readRedirectPoints(MethodNode method, AnnotationNode annotation, boolean remap) {
@@ -717,9 +717,8 @@ final class TransformerHolder {
         String handlerDescForCheck = remap ? this.mappingResolver.mapDescriptor(method.desc) : method.desc;
         String returnCastType = this.resolveReturnCastType(fieldDesc, handlerDescForCheck, spec.isStatic);
         if (ReturnFieldPoint.INCOMPATIBLE_CAST.equals(returnCastType)) {
-            System.err.println("[SeraMixin] @ReturnField handler desc mismatch for "
-                    + this.targetInternalName + " fields " + spec.fields + ": fieldDesc=" + fieldDesc
-                    + " handler=" + method.desc);
+            SeraMixinLogger.warn("@ReturnField handler desc mismatch for {} fields {}: fieldDesc={} handler={}",
+                    this.targetInternalName, spec.fields, fieldDesc, method.desc);
             return;
         }
 
@@ -739,36 +738,37 @@ final class TransformerHolder {
         if ((method.access & Opcodes.ACC_STATIC) != 0 && (method.access & Opcodes.ACC_PUBLIC) != 0) {
             return true;
         }
-        System.err.println("[SeraMixin] @ReturnField handler must be public static: "
-                + this.mixinClassName + "." + method.name + method.desc);
+        SeraMixinLogger.warn("@ReturnField handler must be public static: {}.{}{}",
+                this.mixinClassName, method.name, method.desc);
         return false;
     }
 
     private boolean validateReturnFieldSpec(MethodNode method, ReturnFieldSpec spec) {
         if (spec.fields.isEmpty()) {
-            System.err.println("[SeraMixin] @ReturnField has no field names: " + this.mixinClassName + "." + method.name + method.desc);
+            SeraMixinLogger.warn("@ReturnField has no field names: {}.{}{}",
+                    this.mixinClassName, method.name, method.desc);
             return false;
         }
         if (spec.read || spec.write) {
             return true;
         }
-        System.err.println("[SeraMixin] @ReturnField must handle read or write: " + this.mixinClassName + "." + method.name + method.desc);
+        SeraMixinLogger.warn("@ReturnField must handle read or write: {}.{}{}",
+                this.mixinClassName, method.name, method.desc);
         return false;
     }
 
     private boolean validateReturnFieldArguments(MethodNode method, ReturnFieldSpec spec, Type[] args) {
         int expectedArgCount = spec.isStatic ? 1 : 2;
         if (args.length != expectedArgCount) {
-            System.err.println("[SeraMixin] @ReturnField handler must accept exactly "
-                    + expectedArgCount + " argument(s): " + this.mixinClassName + "." + method.name + method.desc);
+            SeraMixinLogger.warn("@ReturnField handler must accept exactly {} argument(s): {}.{}{}",
+                    expectedArgCount, this.mixinClassName, method.name, method.desc);
             return false;
         }
         if (spec.isStatic || this.isReturnFieldSelfArgCompatible(args[0])) {
             return true;
         }
-        System.err.println("[SeraMixin] @ReturnField handler first argument must be "
-                + this.targetInternalName.replace('/', '.') + " or its supertype: "
-                + this.mixinClassName + "." + method.name + method.desc);
+        SeraMixinLogger.warn("@ReturnField handler first argument must be {} or its supertype: {}.{}{}",
+                this.targetInternalName.replace('/', '.'), this.mixinClassName, method.name, method.desc);
         return false;
     }
 
@@ -949,8 +949,8 @@ final class TransformerHolder {
     }
 
     private void reportInvalidAccessor(MethodNode method, String reason) {
-        System.err.println("[SeraMixin] Invalid @Accessor on "
-                + this.mixinClassName + "." + method.name + method.desc + ": " + reason);
+        SeraMixinLogger.warn("Invalid @Accessor on {}.{}{}: {}",
+                this.mixinClassName, method.name, method.desc, reason);
     }
 
     private static String inferAccessorTargetName(String methodName) {

@@ -88,7 +88,7 @@ final class MixinServiceDiscovery {
             this.readServiceProviderLines(Files.readAllLines(providerPath));
             this.markDirty();
         } catch (IOException exception) {
-            System.err.println("[SeraMixin] Failed to read " + providerPath + ": " + exception.getMessage());
+            SeraMixinLogger.error("Failed to read {}: {}", providerPath, exception.getMessage());
         }
     }
 
@@ -104,7 +104,7 @@ final class MixinServiceDiscovery {
                 }
             } catch (Throwable throwable) {
                 if (!isClassLoadingNotReady(throwable)) {
-                    System.err.println("[SeraMixin] Failed to scan " + SERVICE_FILE + " from " + classLoader + ": " + throwable);
+                    SeraMixinLogger.error("Failed to scan {} from {}: {}", SERVICE_FILE, classLoader, throwable);
                 }
             }
         }
@@ -134,7 +134,7 @@ final class MixinServiceDiscovery {
             this.readServiceProviderLines(reader.lines().toList());
             this.markDirty();
         } catch (IOException exception) {
-            System.err.println("[SeraMixin] Failed to read " + url + ": " + exception.getMessage());
+            SeraMixinLogger.error("Failed to read {}: {}", url, exception.getMessage());
         }
     }
 
@@ -156,7 +156,7 @@ final class MixinServiceDiscovery {
             try {
                 Class<?> providerClass = this.service.resolveClass(providerClassName, this.service.getRuntimeClassLoader());
                 if (!ISeraMixin.class.isAssignableFrom(providerClass)) {
-                    System.err.println("[SeraMixin] Service provider does not implement ISeraMixin: " + providerClassName);
+                    SeraMixinLogger.error("Service provider does not implement ISeraMixin: {}", providerClassName);
                     this.loadedServiceProviders.add(providerClassName);
                     continue;
                 }
@@ -167,8 +167,8 @@ final class MixinServiceDiscovery {
                 if (isClassLoadingNotReady(throwable)) {
                     this.printServiceLoaderNotReady(throwable);
                 } else {
-                    System.err.println("[SeraMixin] Failed to load service provider " + providerClassName + ": " + throwable);
-                    throwable.printStackTrace(System.err);
+                    SeraMixinLogger.error("Failed to load service provider {}: {}", providerClassName, throwable);
+                    SeraMixinLogger.exception(throwable);
                 }
             }
         }
@@ -190,9 +190,9 @@ final class MixinServiceDiscovery {
                     this.registerProviderInstance(provider);
                 } catch (Throwable throwable) {
                     allProvidersLoaded = false;
-                    System.err.println("[SeraMixin] Failed to register ISeraMixin service "
-                            + provider.getClass().getName() + ": " + throwable);
-                    throwable.printStackTrace(System.err);
+                    SeraMixinLogger.error("Failed to register ISeraMixin service {}: {}",
+                            provider.getClass().getName(), throwable);
+                    SeraMixinLogger.exception(throwable);
                 }
             }
         } catch (ServiceConfigurationError error) {
@@ -204,16 +204,16 @@ final class MixinServiceDiscovery {
             if (isClassLoadingNotReady(error)) {
                 this.printServiceLoaderNotReady(error);
             } else {
-                System.err.println("[SeraMixin] Failed to load ISeraMixin services: " + error);
-                error.printStackTrace(System.err);
+                SeraMixinLogger.error("Failed to load ISeraMixin services: {}", error);
+                SeraMixinLogger.exception(error);
             }
         } catch (Throwable throwable) {
             allProvidersLoaded = false;
             if (isClassLoadingNotReady(throwable)) {
                 this.printServiceLoaderNotReady(throwable);
             } else {
-                System.err.println("[SeraMixin] ISeraMixin services are not ready yet: " + throwable);
-                throwable.printStackTrace(System.err);
+                SeraMixinLogger.error("ISeraMixin services are not ready yet: {}", throwable);
+                SeraMixinLogger.exception(throwable);
             }
         }
         return allProvidersLoaded;
@@ -224,7 +224,7 @@ final class MixinServiceDiscovery {
             return;
         }
         this.printedServiceLoaderTypeMismatch = true;
-        System.err.println("[SeraMixin] Ignoring incompatible ISeraMixin ServiceLoader provider: " + error.getMessage());
+        SeraMixinLogger.warn("Ignoring incompatible ISeraMixin ServiceLoader provider: {}", error.getMessage());
     }
 
     private void printServiceLoaderNotReady(Throwable throwable) {
@@ -232,7 +232,7 @@ final class MixinServiceDiscovery {
             return;
         }
         this.printedServiceLoaderNotReady = true;
-        System.err.println("[SeraMixin] ISeraMixin services are not ready yet, will retry: " + throwable);
+        SeraMixinLogger.warn("ISeraMixin services are not ready yet, will retry: {}", throwable);
     }
 
     private static boolean isClassLoadingNotReady(Throwable throwable) {
@@ -273,20 +273,22 @@ final class MixinServiceDiscovery {
     }
 
     private void registerProvider(ISeraMixin provider) {
-        System.err.println("[SeraMixin] Loaded ISeraMixin provider: " + provider.getClass().getName());
+        SeraMixinLogger.info("Loaded ISeraMixin provider: {}", provider.getClass().getName());
         this.service.prepareProviderMapping(provider);
 
         try {
             provider.onLoad();
         } catch (Throwable throwable) {
-            System.err.println("[SeraMixin] ISeraMixin.onLoad failed for " + provider.getClass().getName() + ": " + throwable.getMessage());
+            SeraMixinLogger.error("ISeraMixin.onLoad failed for {}: {}",
+                    provider.getClass().getName(), throwable.getMessage());
         }
 
         String mixinPath = null;
         try {
             mixinPath = provider.getMixinPath();
         } catch (Throwable throwable) {
-            System.err.println("[SeraMixin] ISeraMixin.getMixinPath failed for " + provider.getClass().getName() + ": " + throwable.getMessage());
+            SeraMixinLogger.error("ISeraMixin.getMixinPath failed for {}: {}",
+                    provider.getClass().getName(), throwable.getMessage());
         }
 
         if (mixinPath != null && !mixinPath.isBlank()) {
@@ -298,7 +300,7 @@ final class MixinServiceDiscovery {
                 this.service.registerMixinFromASM(mixinPath, provider.getClass().getClassLoader(), provider);
                 return;
             } catch (Throwable throwable) {
-                System.err.println("[SeraMixin] Failed to register mixin " + mixinPath + ": " + throwable.getMessage());
+                SeraMixinLogger.error("Failed to register mixin {}: {}", mixinPath, throwable.getMessage());
             }
         }
 
