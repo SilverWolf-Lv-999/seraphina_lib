@@ -1,6 +1,7 @@
 package seraphina.seraphina_lib.mixin.service;
 
 import seraphina.seraphina_lib.mixin.util.InsertPosition;
+import seraphina.seraphina_lib.mixin.util.InsertShift;
 import seraphina.seraphina_lib.service.ISeraMixin;
 
 import java.util.List;
@@ -109,18 +110,20 @@ final class InjectPoint {
     final String targetMethodName;
     final String targetDesc;
     final InsertPosition position;
+    final InjectionSelector selector;
     final String mixinClassName;
     final String mixinMethodName;
     final String mixinMethodDesc;
     final boolean mixinMethodStatic;
     final InjectMode mode;
 
-    InjectPoint(String targetMethodName, String targetDesc, InsertPosition position,
+    InjectPoint(String targetMethodName, String targetDesc, InsertPosition position, InjectionSelector selector,
                 String mixinClassName, String mixinMethodName, String mixinMethodDesc,
                 boolean mixinMethodStatic, InjectMode mode) {
         this.targetMethodName = targetMethodName;
         this.targetDesc = targetDesc;
         this.position = position;
+        this.selector = selector == null ? InjectionSelector.DEFAULT : selector;
         this.mixinClassName = mixinClassName;
         this.mixinMethodName = mixinMethodName;
         this.mixinMethodDesc = mixinMethodDesc;
@@ -130,6 +133,31 @@ final class InjectPoint {
 
     boolean matches(String name, String desc) {
         return this.targetMethodName.equals(name) && this.targetDesc.equals(desc);
+    }
+}
+
+final class InjectionSelector {
+    static final InjectionSelector DEFAULT = new InjectionSelector("", "", "", -1, -1, -1, InsertShift.DEFAULT, 0);
+
+    final String owner;
+    final String name;
+    final String desc;
+    final int ordinal;
+    final int opcode;
+    final int index;
+    final InsertShift shift;
+    final int by;
+
+    InjectionSelector(String owner, String name, String desc, int ordinal, int opcode, int index,
+                      InsertShift shift, int by) {
+        this.owner = owner == null ? "" : owner;
+        this.name = name == null ? "" : name;
+        this.desc = desc == null ? "" : desc;
+        this.ordinal = ordinal;
+        this.opcode = opcode;
+        this.index = index;
+        this.shift = shift == null ? InsertShift.DEFAULT : shift;
+        this.by = by;
     }
 }
 

@@ -17,6 +17,7 @@ import org.objectweb.asm.tree.MethodNode;
 import org.objectweb.asm.tree.TryCatchBlockNode;
 import org.objectweb.asm.tree.VarInsnNode;
 import seraphina.seraphina_lib.mixin.util.InsertPosition;
+import seraphina.seraphina_lib.mixin.util.InsertShift;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -111,6 +112,9 @@ final class TransformerHolder {
         for (AnnotationNode annotation : MixinAnnotationUtils.annotationNodes(method.visibleAnnotations, method.invisibleAnnotations)) {
             this.scanMethodAnnotation(method, annotation, mixinInternal, remap, scan);
         }
+        for (AnnotationNode annotation : scan.injectAnnotations) {
+            scan.injects.addAll(this.readInjectPoints(annotation, InsertPosition.CUSTOM, scan.customInjectPoint, remap));
+        }
 
         this.registerInjectPoints(method, scan.injects);
         this.registerOverwritePoints(method, scan.overwrites);
@@ -133,7 +137,11 @@ final class TransformerHolder {
             return;
         }
         if (MixinConstants.INJECT_CLASS.equals(desc)) {
-            scan.injects.addAll(this.readInjectPoints(annotation, InsertPosition.HEAD, remap));
+            scan.injectAnnotations.add(annotation);
+            return;
+        }
+        if (MixinConstants.INJECT_POINT_CLASS.equals(desc)) {
+            scan.customInjectPoint = this.readCustomInjectPoint(annotation, remap);
             return;
         }
         if (MixinConstants.ASM_CLASS.equals(desc)) {
@@ -157,7 +165,7 @@ final class TransformerHolder {
 
     private void registerInjectPoints(MethodNode method, List<InjectInfo> injects) {
         for (InjectInfo injectInfo : injects) {
-            this.injectPoints.add(new InjectPoint(injectInfo.methodName, injectInfo.desc, injectInfo.at,
+            this.injectPoints.add(new InjectPoint(injectInfo.methodName, injectInfo.desc, injectInfo.at, injectInfo.selector,
                     this.mixinClassName, method.name, method.desc, (method.access & Opcodes.ACC_STATIC) != 0,
                     InjectMode.MIXIN));
         }
@@ -176,18 +184,196 @@ final class TransformerHolder {
         putValue(this.rewrittenMethodCache, method.name + method.desc, clonedMethod);
     }
 
-    private List<InjectInfo> readInjectPoints(AnnotationNode annotation, InsertPosition defaultPosition, boolean remap) {
+    private List<InjectInfo> readInjectPoints(AnnotationNode annotation, InsertPosition defaultPosition,
+                                              CustomInjectInfo customInjectPoint, boolean remap) {
         List<String> methodNames = MixinAnnotationUtils.annotationStringListValue(annotation, "methodName");
         String methodDesc = MixinAnnotationUtils.annotationStringValue(annotation, "desc", "");
-        InsertPosition position = MixinAnnotationUtils.annotationEnumValue(annotation, "at", defaultPosition);
+        InsertPosition fallbackPosition = customInjectPoint == null ? defaultPosition : customInjectPoint.at;
+        InsertPosition position = MixinAnnotationUtils.annotationEnumValue(annotation, "at", fallbackPosition);
+        InjectionSelector selector = this.readInjectionSelector(annotation, position,
+                customInjectPoint == null ? InjectionSelector.DEFAULT : customInjectPoint.selector,
+                remap,
+                -1);
         ArrayList<InjectInfo> points = new ArrayList<>();
         for (String methodName : methodNames) {
             MappedMethod mapped = remap
                     ? this.mappingResolver.mapMethod(this.targetInternalName, methodName, methodDesc)
                     : new MappedMethod(methodName, methodDesc);
-            points.add(new InjectInfo(mapped.name(), mapped.desc(), position));
+            points.add(new InjectInfo(mapped.name(), mapped.desc(), position, selector));
         }
         return points;
+    }
+
+    private CustomInjectInfo readCustomInjectPoint(AnnotationNode annotation, boolean remap) {
+        InsertPosition position = MixinAnnotationUtils.annotationEnumValue(annotation, "at", InsertPosition.CUSTOM);
+        InjectionSelector selector = this.readInjectionSelector(annotation, position, InjectionSelector.DEFAULT, remap, 1);
+        return new CustomInjectInfo(position, selector);
+    }
+
+    private InjectionSelector readInjectionSelector(AnnotationNode annotation, InsertPosition position,
+                                                    InjectionSelector fallback, boolean remap, int defaultIndex) {
+        ParsedInjectionTarget parsed = this.parseInjectionTarget(
+                MixinAnnotationUtils.annotationStringValue(annotation, "target", ""),
+                position);
+        String owner = firstNonBlankRaw(
+                MixinAnnotationUtils.annotationStringValue(annotation, "owner", ""),
+                parsed.owner,
+                fallback.owner);
+        if (!owner.isEmpty()) {
+            owner = toInternalClassName(owner);
+        }
+        String name = firstNonBlankRaw(
+                MixinAnnotationUtils.annotationStringValue(annotation, "name", ""),
+                parsed.name,
+                fallback.name);
+        String desc = normalizeDescriptor(firstNonBlankRaw(
+                MixinAnnotationUtils.annotationStringValue(annotation, "targetDesc", ""),
+                parsed.desc,
+                fallback.desc));
+        int ordinal = MixinAnnotationUtils.annotationIntValue(annotation, "ordinal", fallback.ordinal);
+        int opcode = MixinAnnotationUtils.annotationIntValue(annotation, "opcode", fallback.opcode);
+        int index = MixinAnnotationUtils.annotationIntValue(annotation, "index", fallback.index >= 0 ? fallback.index : defaultIndex);
+        InsertShift shift = MixinAnnotationUtils.annotationEnumValue(annotation, "shift", fallback.shift);
+        int by = MixinAnnotationUtils.annotationIntValue(annotation, "by", fallback.by);
+        InjectionSelector selector = new InjectionSelector(owner, name, desc, ordinal, opcode, index, shift, by);
+        return remap ? this.remapInjectionSelector(position, selector) : selector;
+    }
+
+    private InjectionSelector remapInjectionSelector(InsertPosition position, InjectionSelector selector) {
+        String owner = selector.owner;
+        String name = selector.name;
+        String desc = selector.desc;
+        switch (position) {
+            case INVOKE -> {
+                if (!owner.isEmpty()) {
+                    MappedMethod mapped = this.mappingResolver.mapMethod(owner, name, desc);
+                    owner = this.mappingResolver.mapClassName(owner);
+                    name = mapped.name();
+                    desc = mapped.desc();
+                } else if (!desc.isEmpty()) {
+                    desc = this.mappingResolver.mapDescriptor(desc);
+                }
+            }
+            case FIELD -> {
+                if (!owner.isEmpty()) {
+                    if (!name.isEmpty()) {
+                        name = this.mappingResolver.mapFieldName(owner, name);
+                    }
+                    owner = this.mappingResolver.mapClassName(owner);
+                }
+                if (!desc.isEmpty()) {
+                    desc = this.mappingResolver.mapDescriptor(desc);
+                }
+            }
+            case NEW -> {
+                if (!owner.isEmpty()) {
+                    owner = this.mappingResolver.mapClassName(owner);
+                } else if (!name.isEmpty()) {
+                    name = this.mappingResolver.mapClassName(name);
+                }
+            }
+            default -> {
+                if (!desc.isEmpty()) {
+                    desc = this.mappingResolver.mapDescriptor(desc);
+                }
+            }
+        }
+        return new InjectionSelector(owner, name, desc, selector.ordinal, selector.opcode, selector.index,
+                selector.shift, selector.by);
+    }
+
+    private ParsedInjectionTarget parseInjectionTarget(String target, InsertPosition position) {
+        if (target == null || target.isBlank()) {
+            return ParsedInjectionTarget.EMPTY;
+        }
+        String value = target.trim();
+        if (position == InsertPosition.NEW) {
+            return new ParsedInjectionTarget(toInternalClassName(value), "", "");
+        }
+        if (value.startsWith("L")) {
+            int ownerEnd = value.indexOf(';');
+            if (ownerEnd > 1) {
+                String owner = value.substring(1, ownerEnd);
+                String member = value.substring(ownerEnd + 1);
+                return this.parseMemberTarget(owner, member);
+            }
+        }
+        int descStart = value.indexOf('(');
+        if (descStart >= 0) {
+            int nameStart = lastMemberSeparator(value, descStart);
+            if (nameStart >= 0) {
+                String owner = value.substring(0, nameStart);
+                String name = value.substring(nameStart + 1, descStart);
+                return new ParsedInjectionTarget(toInternalClassName(owner), name, value.substring(descStart));
+            }
+            return new ParsedInjectionTarget("", value.substring(0, descStart), value.substring(descStart));
+        }
+        int fieldDescStart = value.indexOf(':');
+        if (fieldDescStart >= 0) {
+            int nameStart = lastMemberSeparator(value, fieldDescStart);
+            if (nameStart >= 0) {
+                String owner = value.substring(0, nameStart);
+                String name = value.substring(nameStart + 1, fieldDescStart);
+                return new ParsedInjectionTarget(toInternalClassName(owner), name, value.substring(fieldDescStart + 1));
+            }
+            return new ParsedInjectionTarget("", value.substring(0, fieldDescStart), value.substring(fieldDescStart + 1));
+        }
+        if (position == InsertPosition.FIELD || position == InsertPosition.INVOKE) {
+            return new ParsedInjectionTarget("", value, "");
+        }
+        return new ParsedInjectionTarget(toInternalClassName(value), "", "");
+    }
+
+    private ParsedInjectionTarget parseMemberTarget(String owner, String member) {
+        if (member == null || member.isEmpty()) {
+            return new ParsedInjectionTarget(toInternalClassName(owner), "", "");
+        }
+        int descStart = member.indexOf('(');
+        if (descStart >= 0) {
+            return new ParsedInjectionTarget(toInternalClassName(owner), member.substring(0, descStart), member.substring(descStart));
+        }
+        int fieldDescStart = member.indexOf(':');
+        if (fieldDescStart >= 0) {
+            return new ParsedInjectionTarget(toInternalClassName(owner), member.substring(0, fieldDescStart),
+                    member.substring(fieldDescStart + 1));
+        }
+        return new ParsedInjectionTarget(toInternalClassName(owner), member, "");
+    }
+
+    private static int lastMemberSeparator(String value, int before) {
+        int slash = value.lastIndexOf('/', before - 1);
+        int dot = value.lastIndexOf('.', before - 1);
+        return Math.max(slash, dot);
+    }
+
+    private static String firstNonBlankRaw(String first, String second, String third) {
+        if (first != null && !first.isBlank()) {
+            return first.trim();
+        }
+        if (second != null && !second.isBlank()) {
+            return second.trim();
+        }
+        return third == null ? "" : third.trim();
+    }
+
+    private static String normalizeDescriptor(String desc) {
+        return desc == null ? "" : desc.trim().replace('\\', '/');
+    }
+
+    private static String normalizeSelectorValue(String value) {
+        String normalized = value.trim();
+        if (normalized.startsWith("L") && normalized.endsWith(";")) {
+            return normalized.substring(1, normalized.length() - 1).replace('.', '/').replace('\\', '/');
+        }
+        return normalized.replace('\\', '/');
+    }
+
+    private static String toInternalClassName(String className) {
+        String normalized = normalizeSelectorValue(className);
+        if (normalized.endsWith(".class")) {
+            normalized = normalized.substring(0, normalized.length() - ".class".length());
+        }
+        return normalized.replace('.', '/');
     }
 
     private List<OverwriteInfo> readOverwritePoints(AnnotationNode annotation, boolean remap) {
@@ -539,8 +725,10 @@ final class TransformerHolder {
     }
 
     private static final class MethodScan {
+        private final ArrayList<AnnotationNode> injectAnnotations = new ArrayList<>();
         private final ArrayList<InjectInfo> injects = new ArrayList<>();
         private final ArrayList<OverwriteInfo> overwrites = new ArrayList<>();
+        private CustomInjectInfo customInjectPoint;
     }
 
     private static final class ReturnFieldTargetSpec {
@@ -570,12 +758,19 @@ final class TransformerHolder {
         }
     }
 
-    private record InjectInfo(String methodName, String desc, InsertPosition at) {
+    private record InjectInfo(String methodName, String desc, InsertPosition at, InjectionSelector selector) {
     }
 
     private record OverwriteInfo(String methodName, String desc) {
     }
 
     private record ReturnFieldSpec(List<String> fields, String fieldDesc, boolean isStatic, boolean read, boolean write) {
+    }
+
+    private record CustomInjectInfo(InsertPosition at, InjectionSelector selector) {
+    }
+
+    private record ParsedInjectionTarget(String owner, String name, String desc) {
+        private static final ParsedInjectionTarget EMPTY = new ParsedInjectionTarget("", "", "");
     }
 }

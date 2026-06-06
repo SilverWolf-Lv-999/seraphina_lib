@@ -31,7 +31,37 @@ public enum InsertPosition {
     HEAD(false),
 
     /**
-     * Inserts near the final instruction of the target method.
+     * Inserts before the last return instruction of the target method.
+     */
+    TAIL(true),
+
+    /**
+     * Inserts before return instructions in the target method.
+     */
+    RETURN(true),
+
+    /**
+     * Inserts around matched method invocation instructions.
+     */
+    INVOKE(true),
+
+    /**
+     * Inserts around matched field access instructions.
+     */
+    FIELD(true),
+
+    /**
+     * Inserts around matched object allocation instructions.
+     */
+    NEW(true),
+
+    /**
+     * Inserts around matched jump instructions.
+     */
+    JUMP(true),
+
+    /**
+     * Inserts before return instructions in the target method.
      */
     LAST(true);
 
@@ -90,7 +120,8 @@ public enum InsertPosition {
     public AbstractInsnNode getPosition(InsertPosition insertPosition) {
         return switch (insertPosition) {
             case HEAD -> getMethodNode().instructions.getFirst();
-            case LAST -> getMethodNode().instructions.get(getMethodNode().instructions.size() - 2);
+            case TAIL -> getMethodNode().instructions.get(getMethodNode().instructions.size() - 2);
+            case RETURN, LAST -> getMethodNode().instructions.get(getMethodNode().instructions.size() - 2);
             default -> null;
         };
     }

@@ -18,6 +18,7 @@ import org.objectweb.asm.tree.MethodNode;
 import org.objectweb.asm.tree.TypeInsnNode;
 import org.objectweb.asm.tree.VarInsnNode;
 import seraphina.seraphina_lib.mixin.util.InsertPosition;
+import seraphina.seraphina_lib.mixin.util.InsertShift;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -228,8 +229,7 @@ final class MixinTransformerEngine {
                 if (!point.matches(method.name, method.desc)) {
                     continue;
                 }
-                changed = true;
-                this.applyMixinInject(method, point, injectContext);
+                changed |= this.applyMixinInject(method, point, injectContext);
             }
         }
         return changed;
@@ -456,7 +456,12 @@ final class MixinTransformerEngine {
         return name.startsWith("lambda.") || name.startsWith("lambda$");
     }
 
-    private void applyMixinInject(MethodNode target, InjectPoint point, InjectContext context) throws NoSuchMethodException, IOException {
+    private boolean applyMixinInject(MethodNode target, InjectPoint point, InjectContext context) throws NoSuchMethodException, IOException {
+        List<ResolvedInjectionPoint> insertionPoints = this.resolveInjectionPoints(target, point, context.classNode);
+        if (insertionPoints.isEmpty()) {
+            this.reportMissingInjectionPoint(target, point);
+            return false;
+        }
         Type targetType = Type.getMethodType(target.desc);
         Type[] targetArgs = targetType.getArgumentTypes();
         boolean targetIsInstance = (target.access & Opcodes.ACC_STATIC) == 0;
@@ -472,10 +477,11 @@ final class MixinTransformerEngine {
         this.appendMixinArguments(buildState, targetArgs, mixinArgTypes);
         buildState.inject.add(new MethodInsnNode(handlerCall.opcode, handlerCall.owner, handlerCall.name, handlerCall.desc, handlerCall.isInterface));
         this.appendCallbackReturnGuard(buildState, targetType.getReturnType());
-        this.insertInjectInstructions(target, point.position, buildState.inject, context.classNode);
+        this.insertResolvedInjectInstructions(target, insertionPoints, buildState.inject);
 
         target.maxLocals = Math.max(target.maxLocals, buildState.baseLocalSlots);
         target.maxStack = Math.max(target.maxStack, 0);
+        return true;
     }
 
     private InjectHandlerCall resolveInjectHandler(InjectPoint point, InjectContext context, String mixinInternal,
@@ -568,29 +574,241 @@ final class MixinTransformerEngine {
         inject.add(this.unboxAndReturn(returnType));
     }
 
-    private void insertInjectInstructions(MethodNode target, InsertPosition position, InsnList inject, ClassNode classNode) {
-        if (position == InsertPosition.LAST) {
-            this.insertBeforeReturns(target, inject);
-            return;
+    private List<ResolvedInjectionPoint> resolveInjectionPoints(MethodNode target, InjectPoint point, ClassNode classNode) {
+        if (target.instructions == null) {
+            return List.of();
         }
-        if (isConstructor(target)) {
-            insertAfterConstructorInit(target, inject, classNode);
-            return;
+        return switch (point.position) {
+            case NONE -> List.of();
+            case HEAD -> this.resolveHeadPoint(target, point, classNode);
+            case TAIL -> this.resolveReturnPoints(target, point, true);
+            case RETURN, LAST -> this.resolveReturnPoints(target, point, false);
+            case INVOKE -> this.resolveInvokePoints(target, point);
+            case FIELD -> this.resolveFieldPoints(target, point);
+            case NEW -> this.resolveNewPoints(target, point);
+            case JUMP -> this.resolveJumpPoints(target, point);
+            case CUSTOM, STR -> this.resolveCustomPoint(target, point, classNode);
+        };
+    }
+
+    private List<ResolvedInjectionPoint> resolveHeadPoint(MethodNode target, InjectPoint point, ClassNode classNode) {
+        if (target.instructions.size() == 0) {
+            return List.of(new ResolvedInjectionPoint(null, false));
         }
-        insertAtMethodStart(target, inject);
+        if (isConstructor(target) && point.selector.shift == InsertShift.DEFAULT && point.selector.by == 0) {
+            AbstractInsnNode initCall = findConstructorInitCall(target, classNode);
+            if (initCall != null) {
+                return List.of(new ResolvedInjectionPoint(initCall, false));
+            }
+        }
+        AbstractInsnNode first = firstRealInstruction(target);
+        if (first == null) {
+            return List.of(new ResolvedInjectionPoint(null, false));
+        }
+        ResolvedInjectionPoint shifted = this.shiftedInjectionPoint(first, point, true);
+        return shifted == null ? List.of() : List.of(shifted);
+    }
+
+    private List<ResolvedInjectionPoint> resolveCustomPoint(MethodNode target, InjectPoint point, ClassNode classNode) {
+        if (point.selector.index < 0) {
+            return this.resolveHeadPoint(target, point, classNode);
+        }
+        AbstractInsnNode indexed = realInstructionAt(target, point.selector.index);
+        if (indexed == null) {
+            return List.of();
+        }
+        ResolvedInjectionPoint shifted = this.shiftedInjectionPoint(indexed, point, point.position.isBefore());
+        return shifted == null ? List.of() : List.of(shifted);
+    }
+
+    private List<ResolvedInjectionPoint> resolveReturnPoints(MethodNode target, InjectPoint point, boolean tailOnly) {
+        ArrayList<AbstractInsnNode> matches = new ArrayList<>();
+        for (AbstractInsnNode node : target.instructions.toArray()) {
+            int opcode = node.getOpcode();
+            if (opcode >= Opcodes.IRETURN && opcode <= Opcodes.RETURN && matchesOpcode(opcode, point.selector)) {
+                matches.add(node);
+            }
+        }
+        List<AbstractInsnNode> selected = this.selectOrdinal(matches, point.selector.ordinal);
+        if (tailOnly && point.selector.ordinal < 0 && !selected.isEmpty()) {
+            selected = List.of(selected.get(selected.size() - 1));
+        }
+        return this.toInsertionPoints(selected, point, true);
+    }
+
+    private List<ResolvedInjectionPoint> resolveInvokePoints(MethodNode target, InjectPoint point) {
+        ArrayList<AbstractInsnNode> matches = new ArrayList<>();
+        for (AbstractInsnNode node : target.instructions.toArray()) {
+            if (node instanceof MethodInsnNode methodInsn && this.matchesInvoke(methodInsn, point.selector)) {
+                matches.add(node);
+            }
+        }
+        return this.toInsertionPoints(this.selectOrdinal(matches, point.selector.ordinal), point, point.position.isBefore());
+    }
+
+    private List<ResolvedInjectionPoint> resolveFieldPoints(MethodNode target, InjectPoint point) {
+        ArrayList<AbstractInsnNode> matches = new ArrayList<>();
+        for (AbstractInsnNode node : target.instructions.toArray()) {
+            if (node instanceof FieldInsnNode fieldInsn && this.matchesField(fieldInsn, point.selector)) {
+                matches.add(node);
+            }
+        }
+        return this.toInsertionPoints(this.selectOrdinal(matches, point.selector.ordinal), point, point.position.isBefore());
+    }
+
+    private List<ResolvedInjectionPoint> resolveNewPoints(MethodNode target, InjectPoint point) {
+        ArrayList<AbstractInsnNode> matches = new ArrayList<>();
+        for (AbstractInsnNode node : target.instructions.toArray()) {
+            if (node instanceof TypeInsnNode typeInsn && this.matchesNew(typeInsn, point.selector)) {
+                matches.add(node);
+            }
+        }
+        return this.toInsertionPoints(this.selectOrdinal(matches, point.selector.ordinal), point, point.position.isBefore());
+    }
+
+    private List<ResolvedInjectionPoint> resolveJumpPoints(MethodNode target, InjectPoint point) {
+        ArrayList<AbstractInsnNode> matches = new ArrayList<>();
+        for (AbstractInsnNode node : target.instructions.toArray()) {
+            if (node instanceof JumpInsnNode && matchesOpcode(node.getOpcode(), point.selector)) {
+                matches.add(node);
+            }
+        }
+        return this.toInsertionPoints(this.selectOrdinal(matches, point.selector.ordinal), point, point.position.isBefore());
+    }
+
+    private List<AbstractInsnNode> selectOrdinal(List<AbstractInsnNode> matches, int ordinal) {
+        if (ordinal < 0) {
+            return matches;
+        }
+        if (ordinal >= matches.size()) {
+            return List.of();
+        }
+        return List.of(matches.get(ordinal));
+    }
+
+    private List<ResolvedInjectionPoint> toInsertionPoints(List<AbstractInsnNode> anchors, InjectPoint point, boolean defaultBefore) {
+        ArrayList<ResolvedInjectionPoint> insertionPoints = new ArrayList<>();
+        for (AbstractInsnNode anchor : anchors) {
+            ResolvedInjectionPoint shifted = this.shiftedInjectionPoint(anchor, point, defaultBefore);
+            if (shifted != null) {
+                insertionPoints.add(shifted);
+            }
+        }
+        return insertionPoints;
+    }
+
+    private ResolvedInjectionPoint shiftedInjectionPoint(AbstractInsnNode anchor, InjectPoint point, boolean defaultBefore) {
+        AbstractInsnNode shifted = shiftRealInstructions(anchor, point.selector.by);
+        if (shifted == null) {
+            return null;
+        }
+        boolean before = switch (point.selector.shift) {
+            case DEFAULT -> defaultBefore;
+            case BEFORE, BY -> true;
+            case AFTER -> false;
+        };
+        return new ResolvedInjectionPoint(shifted, before);
+    }
+
+    private void insertResolvedInjectInstructions(MethodNode target, List<ResolvedInjectionPoint> insertionPoints, InsnList inject) {
+        for (ResolvedInjectionPoint insertionPoint : insertionPoints) {
+            InsnList copy = cloneInsnList(inject);
+            if (insertionPoint.node == null) {
+                target.instructions.add(copy);
+            } else if (insertionPoint.before) {
+                target.instructions.insertBefore(insertionPoint.node, copy);
+            } else {
+                target.instructions.insert(insertionPoint.node, copy);
+            }
+        }
+    }
+
+    private boolean matchesInvoke(MethodInsnNode methodInsn, InjectionSelector selector) {
+        return matchesOpcode(methodInsn.getOpcode(), selector)
+                && matchesText(selector.owner, methodInsn.owner)
+                && matchesText(selector.name, methodInsn.name)
+                && matchesText(selector.desc, methodInsn.desc);
+    }
+
+    private boolean matchesField(FieldInsnNode fieldInsn, InjectionSelector selector) {
+        return matchesOpcode(fieldInsn.getOpcode(), selector)
+                && matchesText(selector.owner, fieldInsn.owner)
+                && matchesText(selector.name, fieldInsn.name)
+                && matchesText(selector.desc, fieldInsn.desc);
+    }
+
+    private boolean matchesNew(TypeInsnNode typeInsn, InjectionSelector selector) {
+        String targetType = !selector.owner.isEmpty() ? selector.owner : selector.name;
+        if (targetType.isEmpty()) {
+            targetType = internalNameFromObjectDescriptor(selector.desc);
+        }
+        return typeInsn.getOpcode() == Opcodes.NEW
+                && matchesOpcode(typeInsn.getOpcode(), selector)
+                && matchesText(targetType, typeInsn.desc);
+    }
+
+    private static boolean matchesOpcode(int opcode, InjectionSelector selector) {
+        return selector.opcode < 0 || selector.opcode == opcode;
+    }
+
+    private static boolean matchesText(String expected, String actual) {
+        return expected == null || expected.isEmpty() || expected.equals(actual);
+    }
+
+    private static String internalNameFromObjectDescriptor(String desc) {
+        if (desc == null || desc.length() < 3 || desc.charAt(0) != 'L' || desc.charAt(desc.length() - 1) != ';') {
+            return "";
+        }
+        return desc.substring(1, desc.length() - 1);
+    }
+
+    private static AbstractInsnNode firstRealInstruction(MethodNode target) {
+        for (AbstractInsnNode node = target.instructions.getFirst(); node != null; node = node.getNext()) {
+            if (isRealInstruction(node)) {
+                return node;
+            }
+        }
+        return null;
+    }
+
+    private static AbstractInsnNode realInstructionAt(MethodNode target, int index) {
+        int currentIndex = 0;
+        for (AbstractInsnNode node = target.instructions.getFirst(); node != null; node = node.getNext()) {
+            if (!isRealInstruction(node)) {
+                continue;
+            }
+            if (currentIndex == index) {
+                return node;
+            }
+            currentIndex++;
+        }
+        return null;
+    }
+
+    private static AbstractInsnNode shiftRealInstructions(AbstractInsnNode anchor, int by) {
+        AbstractInsnNode current = anchor;
+        int remaining = Math.abs(by);
+        while (remaining > 0 && current != null) {
+            current = by > 0 ? current.getNext() : current.getPrevious();
+            if (current != null && isRealInstruction(current)) {
+                remaining--;
+            }
+        }
+        return current;
+    }
+
+    private static boolean isRealInstruction(AbstractInsnNode node) {
+        return node != null && node.getOpcode() >= 0;
+    }
+
+    private void reportMissingInjectionPoint(MethodNode target, InjectPoint point) {
+        System.err.println("[SeraMixin] @Inject point not found: " + point.position + " in "
+                + target.name + target.desc + " for "
+                + point.mixinClassName + "." + point.mixinMethodName + point.mixinMethodDesc);
     }
 
     private static boolean isConstructor(MethodNode target) {
         return "<init>".equals(target.name);
-    }
-
-    private static void insertAfterConstructorInit(MethodNode target, InsnList inject, ClassNode classNode) {
-        AbstractInsnNode initCall = findConstructorInitCall(target, classNode);
-        if (initCall != null) {
-            target.instructions.insert(initCall, inject);
-            return;
-        }
-        insertAtMethodStart(target, inject);
     }
 
     private static AbstractInsnNode findConstructorInitCall(MethodNode target, ClassNode classNode) {
@@ -605,15 +823,6 @@ final class MixinTransformerEngine {
             }
         }
         return null;
-    }
-
-    private static void insertAtMethodStart(MethodNode target, InsnList inject) {
-        AbstractInsnNode first = target.instructions.getFirst();
-        if (first != null) {
-            target.instructions.insertBefore(first, inject);
-        } else {
-            target.instructions.add(inject);
-        }
     }
 
     private InjectHandlerCall ensureInjectHandlerMethod(InjectPoint point, InjectContext context, String mixinInternal,
@@ -929,6 +1138,9 @@ final class MixinTransformerEngine {
                 method.maxLocals = Math.max(method.maxLocals, requiredSize);
             }
         }
+    }
+
+    private record ResolvedInjectionPoint(AbstractInsnNode node, boolean before) {
     }
 
     private static final class InjectionState {

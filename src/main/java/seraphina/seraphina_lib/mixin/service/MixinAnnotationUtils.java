@@ -3,6 +3,7 @@ package seraphina.seraphina_lib.mixin.service;
 import org.objectweb.asm.Type;
 import org.objectweb.asm.tree.AnnotationNode;
 import seraphina.seraphina_lib.mixin.util.InsertPosition;
+import seraphina.seraphina_lib.mixin.util.InsertShift;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -71,6 +72,11 @@ final class MixinAnnotationUtils {
         return value instanceof Boolean booleanValue ? booleanValue : defaultValue;
     }
 
+    static int annotationIntValue(AnnotationNode annotation, String key, int defaultValue) {
+        Object value = annotationValue(annotation, key);
+        return value instanceof Integer intValue ? intValue : defaultValue;
+    }
+
     static String annotationTypeDescriptorValue(AnnotationNode annotation, String key) {
         Object value = annotationValue(annotation, key);
         if (value instanceof Type type) {
@@ -99,6 +105,17 @@ final class MixinAnnotationUtils {
         if (value instanceof String[] enumValue && enumValue.length > 1) {
             try {
                 return InsertPosition.valueOf(enumValue[1]);
+            } catch (IllegalArgumentException ignored) {
+            }
+        }
+        return defaultValue;
+    }
+
+    static InsertShift annotationEnumValue(AnnotationNode annotation, String key, InsertShift defaultValue) {
+        Object value = annotationValue(annotation, key);
+        if (value instanceof String[] enumValue && enumValue.length > 1) {
+            try {
+                return InsertShift.valueOf(enumValue[1]);
             } catch (IllegalArgumentException ignored) {
             }
         }

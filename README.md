@@ -127,6 +127,7 @@ import seraphina.seraphina_lib.mixin.annotation.Inject;
 import seraphina.seraphina_lib.mixin.annotation.SeraMixin;
 import seraphina.seraphina_lib.mixin.util.CallBackInfo;
 import seraphina.seraphina_lib.mixin.util.InsertPosition;
+import seraphina.seraphina_lib.mixin.util.InsertShift;
 
 @SeraMixin(TargetExample.class)
 public class TargetExampleMixin {
@@ -160,12 +161,32 @@ private void beforeCanUse(TargetExample self, int level, CallBackInfo callbackIn
 }
 ```
 
+更精确的注入点可使用 `INVOKE`、`FIELD`、`NEW`、`JUMP`、`RETURN`、`TAIL` 等位置，并配合
+`target`、`ordinal`、`opcode`、`shift`、`by` 定位具体指令：
+
+```java
+@Inject(
+    methodName = {"tick"},
+    desc = "()V",
+    at = InsertPosition.INVOKE,
+    target = "net/minecraft/world/entity/Entity/baseTick()V",
+    shift = InsertShift.AFTER
+)
+private void afterBaseTick(CallBackInfo callbackInfo) {
+}
+```
+
+`target` 支持 `owner/name(desc)ret`、`Lowner;name(desc)ret`、`owner/name:desc` 和
+`NEW` 的类名形式；也可以拆开写 `owner`、`name`、`targetDesc`。`ordinal` 是匹配到的第几个指令，
+`opcode` 可用 ASM opcode 进一步过滤，`by` 会在最终锚点上按真实字节码指令前后移动。
+同一个 handler 上的 `@InjectPoint` 现在会作为 `CUSTOM` 的索引或定位配置参与解析。
+
 ## 注解速查
 
 | 注解 | 作用 | 备注 |
 | --- | --- | --- |
 | `@SeraMixin(Target.class)` | 声明当前类要注入的目标类 | 必需 |
-| `@Inject(methodName, desc, at)` | 在目标方法头部或返回前插入 handler | 当前主要支持 `HEAD`、`LAST` |
+| `@Inject(methodName, desc, at)` | 在目标方法或目标指令附近插入 handler | 支持 `HEAD`、`TAIL`、`RETURN`、`INVOKE`、`FIELD`、`NEW`、`JUMP`、`CUSTOM` |
 | `@Overwrite(methodName, desc)` | 用 Mixin 方法体替换目标方法体 | 谨慎使用，冲突风险较高 |
 | `@Redirect(methodName, methodDesc, targetMethod, targetMethodDesc)` | 把目标方法中的指定调用重定向到 handler | handler 需要匹配调用参数/返回值 |
 | `@ReturnField(field, type, isStatic, read, write)` | 拦截指定字段读写，并经由 public static handler 返回新值 | 实例字段 handler 形如 `(Target self, T value)T`，静态字段 handler 形如 `(T value)T` |
