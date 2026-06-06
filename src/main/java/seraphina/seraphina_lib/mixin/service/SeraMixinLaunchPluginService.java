@@ -54,6 +54,7 @@ public class SeraMixinLaunchPluginService implements ILaunchPluginService {
         this.serviceDiscovery = new MixinServiceDiscovery(this);
         currentService = this;
         this.drainPendingMixins();
+        this.ensureMixinServicesLoaded();
     }
 
     @Override
@@ -72,10 +73,12 @@ public class SeraMixinLaunchPluginService implements ILaunchPluginService {
             return EnumSet.noneOf(Phase.class);
         }
         String internalName = classType.getInternalName();
-        if (MixinConstants.isPlatformOrLoaderClass(internalName)) {
+        if (isPlatformOrLoaderClass(internalName)) {
             return EnumSet.noneOf(Phase.class);
         }
-        this.ensureMixinServicesLoaded();
+        if (!this.ensureMixinServicesLoaded()) {
+            return EnumSet.noneOf(Phase.class);
+        }
         return this.hasRegisteredMixins() ? EnumSet.of(Phase.BEFORE) : EnumSet.noneOf(Phase.class);
     }
 
@@ -88,10 +91,12 @@ public class SeraMixinLaunchPluginService implements ILaunchPluginService {
             return ComputeFlags.NO_REWRITE;
         }
         String internalName = classNode.name != null ? classNode.name : classType.getInternalName();
-        if (MixinConstants.isPlatformOrLoaderClass(internalName)) {
+        if (isPlatformOrLoaderClass(internalName)) {
             return ComputeFlags.NO_REWRITE;
         }
-        this.ensureMixinServicesLoaded();
+        if (!this.ensureMixinServicesLoaded()) {
+            return ComputeFlags.NO_REWRITE;
+        }
         if (!this.hasRegisteredMixins()) {
             return ComputeFlags.NO_REWRITE;
         }
@@ -158,7 +163,7 @@ public class SeraMixinLaunchPluginService implements ILaunchPluginService {
             return;
         }
         String normalizedName = name == null ? resource.toString().replace('\\', '/') : name.replace('\\', '/');
-        if (normalizedName.endsWith(MixinConstants.SERVICE_FILE)) {
+        if (normalizedName.endsWith(MixinServiceDiscovery.SERVICE_FILE)) {
             this.serviceDiscovery.readServiceProviderFile(resource);
             this.serviceDiscovery.markDirty();
         }
@@ -259,8 +264,67 @@ public class SeraMixinLaunchPluginService implements ILaunchPluginService {
         }
     }
 
-    private void ensureMixinServicesLoaded() {
-        this.serviceDiscovery.ensureLoaded();
+    private static boolean isPlatformOrLoaderClass(String internalName) {
+        if (internalName == null) {
+            return true;
+        }
+        return internalName.startsWith("java/")
+                || internalName.startsWith("javax/")
+                || internalName.startsWith("jdk/")
+                || internalName.startsWith("sun/")
+                || internalName.startsWith("com/sun/")
+                || internalName.startsWith("org/w3c/")
+                || internalName.startsWith("org/xml/")
+                || internalName.startsWith("org/objectweb/asm/")
+                || internalName.startsWith("cpw/mods/securejarhandler/")
+                || internalName.startsWith("cpw/mods/modlauncher/")
+                || internalName.startsWith("seraphina/seraphina_lib/")
+                || internalName.startsWith("seraphina/seraphina_lib/mixin/service/");
+    }
+
+    private static String normalizeClassName(String className) {
+        String normalized = className.trim();
+        if (normalized.endsWith(".class")) {
+            normalized = normalized.substring(0, normalized.length() - ".class".length());
+        }
+        if (normalized.startsWith("L") && normalized.endsWith(";")) {
+            normalized = normalized.substring(1, normalized.length() - 1);
+        }
+        return normalized.replace('/', '.').replace('\\', '.');
+    }
+
+    private static String normalizePackageName(String packageName) {
+        String normalized = packageName.trim();
+        while (normalized.endsWith("/") || normalized.endsWith("\\") || normalized.endsWith(".")) {
+            normalized = normalized.substring(0, normalized.length() - 1);
+        }
+        if (normalized.endsWith(".*")) {
+            normalized = normalized.substring(0, normalized.length() - 2);
+        }
+        return normalized.replace('/', '.').replace('\\', '.');
+    }
+
+    private static String toInternalName(String className) {
+        String normalized = className.trim();
+        if (normalized.endsWith(".class")) {
+            normalized = normalized.substring(0, normalized.length() - ".class".length());
+        }
+        if (normalized.startsWith("L") && normalized.endsWith(";")) {
+            normalized = normalized.substring(1, normalized.length() - 1);
+        }
+        return normalized.replace('.', '/').replace('\\', '/');
+    }
+
+    private boolean ensureMixinServicesLoaded() {
+        try {
+            this.serviceDiscovery.ensureLoaded();
+            return true;
+        } catch (Throwable throwable) {
+            this.serviceDiscovery.markDirty();
+            System.err.println("[SeraMixin] Mixin services are not ready yet: " + throwable);
+            throwable.printStackTrace(System.err);
+            return false;
+        }
     }
 
     private void register(Class<?> mixinClass, ISeraMixin hook) {
@@ -274,12 +338,12 @@ public class SeraMixinLaunchPluginService implements ILaunchPluginService {
         if (this.registerMixinIfAnnotatedFromASM(mixinClassName, mixinClassLoader, hook)) {
             return;
         }
-        String normalizedMixin = MixinNameUtils.normalizeClassName(mixinClassName);
+        String normalizedMixin = normalizeClassName(mixinClassName);
         System.err.println("[SeraMixin] Missing @SeraMixin target on " + normalizedMixin);
     }
 
     private boolean registerMixinIfAnnotatedFromASM(String mixinClassName, ClassLoader mixinClassLoader, ISeraMixin hook) {
-        String normalizedMixin = MixinNameUtils.normalizeClassName(mixinClassName);
+        String normalizedMixin = normalizeClassName(mixinClassName);
         String targetInternalName = this.readSeraMixinTargetInternalName(normalizedMixin, mixinClassLoader);
         if (targetInternalName == null || targetInternalName.isBlank()) {
             return false;
@@ -290,7 +354,7 @@ public class SeraMixinLaunchPluginService implements ILaunchPluginService {
     }
 
     int registerMixinPackage(String mixinPackageName, ClassLoader mixinClassLoader, ISeraMixin hook) {
-        String normalizedPackage = MixinNameUtils.normalizePackageName(mixinPackageName);
+        String normalizedPackage = normalizePackageName(mixinPackageName);
         List<String> mixinClassNames = this.classProvider.findClassNamesInPackage(normalizedPackage, mixinClassLoader);
         if (mixinClassNames.isEmpty()) {
             return -1;
@@ -313,7 +377,7 @@ public class SeraMixinLaunchPluginService implements ILaunchPluginService {
     }
 
     private String readSeraMixinTargetInternalName(String mixinClassName, ClassLoader mixinClassLoader) {
-        String normalizedMixin = MixinNameUtils.normalizeClassName(mixinClassName);
+        String normalizedMixin = normalizeClassName(mixinClassName);
         byte[] mixinBytes;
         try {
             mixinBytes = this.classProvider.loadMixinBytes(normalizedMixin, mixinClassLoader);
@@ -341,9 +405,9 @@ public class SeraMixinLaunchPluginService implements ILaunchPluginService {
     }
 
     private void register(String mixinClassName, String targetClassName, ClassLoader mixinClassLoader, ISeraMixin hook, int priority) {
-        String normalizedMixin = MixinNameUtils.normalizeClassName(mixinClassName);
+        String normalizedMixin = normalizeClassName(mixinClassName);
         MixinMappingResolver mappingResolver = this.mappingManager.mappingFor(hook);
-        String targetInternal = mappingResolver.mapClassName(MixinNameUtils.toInternalName(targetClassName));
+        String targetInternal = mappingResolver.mapClassName(toInternalName(targetClassName));
         ClassLoader loader = mixinClassLoader != null ? mixinClassLoader : this.getRuntimeClassLoader();
         ClassInfo info = new ClassInfo(normalizedMixin, targetInternal, loader, hook, priority, mappingResolver);
         this.registeredMixins.compute(targetInternal, (target, oldValue) -> {

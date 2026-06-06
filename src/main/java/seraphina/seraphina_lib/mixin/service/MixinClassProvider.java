@@ -44,7 +44,7 @@ final class MixinClassProvider {
             return List.of();
         }
 
-        String packagePath = MixinNameUtils.normalizePackageName(packageName).replace('.', '/');
+        String packagePath = normalizePackageName(packageName).replace('.', '/');
         LinkedHashSet<String> classNames = new LinkedHashSet<>();
         this.findClassNamesFromClassLoaders(packagePath, preferredLoader, classNames);
         this.findClassNamesFromSecureJars(packagePath, classNames);
@@ -141,7 +141,7 @@ final class MixinClassProvider {
     }
 
     Class<?> resolveClass(String className, ClassLoader preferredLoader) throws ClassNotFoundException {
-        String normalized = MixinNameUtils.normalizeClassName(className);
+        String normalized = normalizeProviderClassName(className);
         ClassNotFoundException failure = null;
         for (ClassLoader candidate : this.classLoaderCandidates(preferredLoader)) {
             try {
@@ -151,6 +151,28 @@ final class MixinClassProvider {
             }
         }
         throw failure == null ? new ClassNotFoundException(normalized) : failure;
+    }
+
+    private static String normalizeProviderClassName(String className) {
+        String normalized = className.trim();
+        if (normalized.endsWith(".class")) {
+            normalized = normalized.substring(0, normalized.length() - ".class".length());
+        }
+        if (normalized.startsWith("L") && normalized.endsWith(";")) {
+            normalized = normalized.substring(1, normalized.length() - 1);
+        }
+        return normalized.replace('/', '.').replace('\\', '.');
+    }
+
+    private static String normalizePackageName(String packageName) {
+        String normalized = packageName.trim();
+        while (normalized.endsWith("/") || normalized.endsWith("\\") || normalized.endsWith(".")) {
+            normalized = normalized.substring(0, normalized.length() - 1);
+        }
+        if (normalized.endsWith(".*")) {
+            normalized = normalized.substring(0, normalized.length() - 2);
+        }
+        return normalized.replace('/', '.').replace('\\', '.');
     }
 
     private void findClassNamesFromClassLoaders(String packagePath, ClassLoader preferredLoader, Set<String> classNames) {

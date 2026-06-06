@@ -15,21 +15,16 @@ import seraphina.seraphina_lib.util.ModuleUtil;
  */
 @Mod(LIBSource.MOD_ID)
 public class LIBSource {
-    /**
-     * Forge mod id used by the loader and resource system.
-     */
+
     public static final String MOD_ID = "seraphina_lib";
     private static final Logger LOGGER = LoggerFactory.getLogger(LIBSource.class);
 
-    /**
-     * Creates the library mod entry point.
-     */
     public LIBSource() {
         LOGGER.info("Seraphina Lib Initialized");
         if (ModUtil.isDevelopment()) {
             LOGGER.info("Development mode enabled");
             LOGGER.debug("Find {} count mods", ModList.get().size());
-            ModList.get().getMods().forEach(mod -> {
+             ModList.get().getMods().forEach(mod -> {
                 LOGGER.debug(" -{}", mod.getModId());
             });
         }

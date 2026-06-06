@@ -1,7 +1,5 @@
 package seraphina.seraphina_lib.util;
 
-import cpw.mods.modlauncher.Launcher;
-import cpw.mods.modlauncher.ModuleLayerHandler;
 import cpw.mods.modlauncher.api.NamedPath;
 import net.minecraftforge.fml.loading.ModDirTransformerDiscoverer;
 import org.apache.commons.compress.utils.IOUtils;
@@ -16,7 +14,6 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.lang.invoke.MethodHandle;
-import java.lang.module.ResolvedModule;
 import java.lang.reflect.AccessibleObject;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
@@ -24,6 +21,8 @@ import java.lang.reflect.Modifier;
 import java.net.URL;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.security.CodeSource;
 import java.util.*;
 import java.util.jar.JarEntry;
@@ -292,54 +291,52 @@ public final class HelperLib {
     @SuppressWarnings({"ConstantConditions", "unchecked", "rawtypes"})
     public static void coexistenceCoreAndMod() {
         List<NamedPath> found = HelperLib.getFieldValue(ModDirTransformerDiscoverer.class, "found", List.class);
-        String currentJarPath = HelperLib.getJarPath(HelperLib.class);
-        if (found != null) {
-            found.removeIf(namedPath -> Arrays.stream(namedPath.paths()).anyMatch(path -> currentJarPath.equals(path.toString())));
+        if (found == null) {
+            LOGGER.warn("Cannot access ModDirTransformerDiscoverer.found");
+            return;
         }
 
-        ModuleLayerHandler moduleLayerHandler = HelperLib.getFieldValue(Launcher.INSTANCE, "moduleLayerHandler", ModuleLayerHandler.class);
-        EnumMap completedLayers = moduleLayerHandler == null ? null : HelperLib.getFieldValue(moduleLayerHandler, "completedLayers", EnumMap.class);
-        if (completedLayers == null) return;
+        Path currentJarPath = normalizePath(Path.of(HelperLib.getJarPath(HelperLib.class)));
+        if (currentJarPath == null || !currentJarPath.toString().toLowerCase(Locale.ROOT).endsWith(".jar")) {
+            LOGGER.debug("Current code source is not a jar, skip mods-folder exclusion: {}", currentJarPath);
+            return;
+        }
 
-        String moduleName = HelperLib.class.getModule().getName();
-        completedLayers.values().forEach(layerInfo -> {
-            ModuleLayer layer = HelperLib.getFieldValue(layerInfo, "layer", ModuleLayer.class);
-            if (layer == null) return;
-
-            layer.modules().forEach(module -> {
-                if (moduleName.equals(module.getName())) {
-                    Set<ResolvedModule> existingModules = HelperLib.getFieldValue(layer.configuration(), "modules", Set.class);
-                    Map<String, ResolvedModule> existingNameToModule = HelperLib.getFieldValue(layer.configuration(), "nameToModule", Map.class);
-                    if (existingModules == null || existingNameToModule == null) return;
-
-                    Set<ResolvedModule> modules = copyModulesWithout(existingModules, moduleName);
-                    Map<String, ResolvedModule> nameToModule = copyNameToModuleWithout(existingNameToModule, moduleName);
-
-                    HelperLib.setFieldValue(layer.configuration(), "modules", modules);
-                    HelperLib.setFieldValue(layer.configuration(), "nameToModule", nameToModule);
-                }
-            });
-        });
+        boolean alreadyExcluded = found.stream()
+                .filter(Objects::nonNull)
+                .flatMap(namedPath -> Arrays.stream(namedPath.paths()))
+                .anyMatch(path -> isSamePath(currentJarPath, path));
+        if (!alreadyExcluded) {
+            found.add(new NamedPath("cpw.mods.modlauncher.api.ITransformationService", currentJarPath));
+            LOGGER.info("Excluded transformation-service jar from normal mod scan: {}", currentJarPath);
+        }
     }
 
-    private static Set<ResolvedModule> copyModulesWithout(Set<ResolvedModule> source, String moduleName) {
-        Set<ResolvedModule> modules = new HashSet<>();
-        for (ResolvedModule module : source) {
-            if (!moduleName.equals(module.name())) {
-                modules.add(module);
-            }
+    private static Path normalizePath(Path path) {
+        if (path == null) {
+            return null;
         }
-        return modules;
+        try {
+            Path normalized = path.toAbsolutePath().normalize();
+            return Files.exists(normalized) ? normalized.toRealPath() : normalized;
+        } catch (Throwable ignored) {
+            return path.toAbsolutePath().normalize();
+        }
     }
 
-    private static Map<String, ResolvedModule> copyNameToModuleWithout(Map<String, ResolvedModule> source, String moduleName) {
-        Map<String, ResolvedModule> nameToModule = new HashMap<>();
-        for (Map.Entry<String, ResolvedModule> entry : source.entrySet()) {
-            if (!moduleName.equals(entry.getKey())) {
-                ResolvedModule ignored = nameToModule.put(entry.getKey(), entry.getValue());
-            }
+    private static boolean isSamePath(Path expected, Path actual) {
+        Path normalizedActual = normalizePath(actual);
+        if (expected == null || normalizedActual == null) {
+            return false;
         }
-        return nameToModule;
+        if (expected.equals(normalizedActual)) {
+            return true;
+        }
+        try {
+            return Files.exists(expected) && Files.exists(normalizedActual) && Files.isSameFile(expected, normalizedActual);
+        } catch (IOException ignored) {
+            return expected.toString().equalsIgnoreCase(normalizedActual.toString());
+        }
     }
 
     /**

@@ -45,9 +45,20 @@ final class MixinAnnotationUtils {
             return type.getInternalName();
         }
         if (value instanceof String stringValue && !stringValue.isBlank()) {
-            return MixinNameUtils.toInternalName(stringValue);
+            return toInternalName(stringValue);
         }
         return null;
+    }
+
+    private static String toInternalName(String className) {
+        String normalized = className.trim();
+        if (normalized.endsWith(".class")) {
+            normalized = normalized.substring(0, normalized.length() - ".class".length());
+        }
+        if (normalized.startsWith("L") && normalized.endsWith(";")) {
+            normalized = normalized.substring(1, normalized.length() - 1);
+        }
+        return normalized.replace('.', '/').replace('\\', '/');
     }
 
     static String annotationStringValue(AnnotationNode annotation, String key, String defaultValue) {
