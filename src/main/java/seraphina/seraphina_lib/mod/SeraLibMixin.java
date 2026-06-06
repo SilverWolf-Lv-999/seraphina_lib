@@ -14,9 +14,7 @@ public class SeraLibMixin implements ISeraMixin {
 
     @Override
     public void onLoad() {
-        for (int i = 0; i <= 100; i++) {
-            LOGGER.info("1");
-        }
+        ISeraMixin.super.onLoad();
     }
 
     static {

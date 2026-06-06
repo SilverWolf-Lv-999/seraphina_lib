@@ -469,7 +469,7 @@ final class MixinTransformerEngine {
         this.appendMixinArguments(buildState, targetArgs, mixinArgTypes);
         buildState.inject.add(new MethodInsnNode(handlerCall.opcode, handlerCall.owner, handlerCall.name, handlerCall.desc, handlerCall.isInterface));
         this.appendCallbackReturnGuard(buildState, targetType.getReturnType());
-        this.insertInjectInstructions(target, point.position, buildState.inject);
+        this.insertInjectInstructions(target, point.position, buildState.inject, context.classNode);
 
         target.maxLocals = Math.max(target.maxLocals, buildState.baseLocalSlots);
         target.maxStack = Math.max(target.maxStack, 0);
@@ -565,12 +565,43 @@ final class MixinTransformerEngine {
         inject.add(this.unboxAndReturn(returnType));
     }
 
-    private void insertInjectInstructions(MethodNode target, InsertPosition position, InsnList inject) {
+    private void insertInjectInstructions(MethodNode target, InsertPosition position, InsnList inject, ClassNode classNode) {
         if (position == InsertPosition.LAST) {
             this.insertBeforeReturns(target, inject);
             return;
         }
+        if (isConstructor(target)) {
+            insertAfterConstructorInit(target, inject, classNode);
+            return;
+        }
         insertAtMethodStart(target, inject);
+    }
+
+    private static boolean isConstructor(MethodNode target) {
+        return "<init>".equals(target.name);
+    }
+
+    private static void insertAfterConstructorInit(MethodNode target, InsnList inject, ClassNode classNode) {
+        AbstractInsnNode initCall = findConstructorInitCall(target, classNode);
+        if (initCall != null) {
+            target.instructions.insert(initCall, inject);
+            return;
+        }
+        insertAtMethodStart(target, inject);
+    }
+
+    private static AbstractInsnNode findConstructorInitCall(MethodNode target, ClassNode classNode) {
+        String self = classNode == null ? null : classNode.name;
+        String superName = classNode == null ? null : classNode.superName;
+        for (AbstractInsnNode node : target.instructions.toArray()) {
+            if (node instanceof MethodInsnNode methodInsn
+                    && methodInsn.getOpcode() == Opcodes.INVOKESPECIAL
+                    && "<init>".equals(methodInsn.name)
+                    && (methodInsn.owner.equals(self) || methodInsn.owner.equals(superName))) {
+                return methodInsn;
+            }
+        }
+        return null;
     }
 
     private static void insertAtMethodStart(MethodNode target, InsnList inject) {

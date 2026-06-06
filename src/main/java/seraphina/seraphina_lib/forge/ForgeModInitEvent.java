@@ -19,7 +19,6 @@ public abstract class ForgeModInitEvent extends Event {
     }
 
     public static class Post extends ForgeModInitEvent {
-
         public Post(ForgeMod forgeMod) {
             super(forgeMod);
         }
