@@ -181,6 +181,60 @@ private void afterBaseTick(CallBackInfo callbackInfo) {
 `opcode` 可用 ASM opcode 进一步过滤，`by` 会在最终锚点上按真实字节码指令前后移动。
 同一个 handler 上的 `@InjectPoint` 现在会作为 `CUSTOM` 的索引或定位配置参与解析。
 
+### 4. 让目标类实现接口
+
+Mixin 类可以实现你自己的接口。转换时 SeraMixin 会把接口加入目标类，并复制 Mixin 中没有
+SeraMixin 专用注解的普通字段和方法。因此外部代码可以把目标实例强转为该接口使用。
+
+接口示例：
+
+```java
+package com.example;
+
+public interface ILivingEntity {
+    float getF();
+}
+```
+
+Mixin 示例：
+
+```java
+package com.example.mixin;
+
+import net.minecraft.world.entity.LivingEntity;
+import seraphina.seraphina_lib.mixin.annotation.CallbackInfo;
+import seraphina.seraphina_lib.mixin.annotation.Inject;
+import seraphina.seraphina_lib.mixin.annotation.SeraMixin;
+import seraphina.seraphina_lib.mixin.util.CallBackInfo;
+import seraphina.seraphina_lib.mixin.util.InsertPosition;
+import com.example.ILivingEntity;
+
+@SeraMixin(LivingEntity.class)
+public class LivingEntityMixin implements ILivingEntity {
+    private final LivingEntity sera$living = (LivingEntity) (Object) this;
+
+    @Inject(methodName = {"getHealth"}, desc = "()F", at = InsertPosition.HEAD, callback = @CallbackInfo(callback = true))
+    public void getHealth(CallBackInfo ci) {
+        ci.setBackValue(20.0F);
+    }
+
+    @Override
+    public float getF() {
+        return sera$living.getHealth();
+    }
+}
+```
+
+使用示例：
+
+```java
+LivingEntity entity = ...;
+float value = ((ILivingEntity) entity).getF();
+```
+
+带 `@Inject`、`@Overwrite`、`@Redirect`、`@ReturnField`、`@Shadow` 等 SeraMixin 注解的方法会按对应规则处理，
+不会作为普通接口方法复制；像 `getF()` 这种无专用注解的普通方法会被复制到目标类。
+
 ## 注解速查
 
 | 注解 | 作用 | 备注 |

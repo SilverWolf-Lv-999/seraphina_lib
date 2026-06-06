@@ -40,6 +40,10 @@ final class TransformerHolder {
     final List<OverwritePoint> overwritePoints = new ArrayList<>();
     final List<RedirectPoint> redirectPoints = new ArrayList<>();
     final List<ReturnFieldPoint> returnFieldPoints = new ArrayList<>();
+    final List<String> interfaceInternalNames = new ArrayList<>();
+    final List<FieldNode> mixinFields = new ArrayList<>();
+    final List<MethodNode> mixinMethods = new ArrayList<>();
+    final List<InsnList> instanceFieldInitializers = new ArrayList<>();
     final Map<String, ShadowFieldInfo> shadowFields = new HashMap<>();
     final Map<String, ShadowMethodInfo> shadowMethods = new HashMap<>();
     final Map<String, MethodNode> rewrittenMethodCache = new HashMap<>();
@@ -70,10 +74,13 @@ final class TransformerHolder {
         String mixinInternal = this.mixinClassName.replace('.', '/');
         boolean remap = this.mappingResolver.isEnabled() && !this.hasNoRemapping(classNode);
 
+        this.scanInterfaces(classNode, remap);
+        this.scanMixinFields(classNode, remap);
         this.scanShadowFields(classNode, remap);
         for (MethodNode method : classNode.methods) {
             this.scanMethod(method, mixinInternal, remap);
         }
+        this.scanInstanceFieldInitializers(classNode, mixinInternal);
         return classNode;
     }
 
@@ -84,12 +91,35 @@ final class TransformerHolder {
                 MixinConstants.NO_REMAPPING_CLASS) != null;
     }
 
+    private void scanInterfaces(ClassNode classNode, boolean remap) {
+        if (classNode.interfaces == null || classNode.interfaces.isEmpty()) {
+            return;
+        }
+        LinkedHashSet<String> interfaces = new LinkedHashSet<>(classNode.interfaces);
+        for (String interfaceName : interfaces) {
+            if (interfaceName == null || interfaceName.isBlank()) {
+                continue;
+            }
+            String mappedName = remap ? this.mappingResolver.mapClassName(interfaceName) : interfaceName;
+            if (!this.targetInternalName.equals(mappedName) && !this.interfaceInternalNames.contains(mappedName)) {
+                this.interfaceInternalNames.add(mappedName);
+            }
+        }
+    }
+
+    private void scanMixinFields(ClassNode classNode, boolean remap) {
+        for (FieldNode field : classNode.fields) {
+            if (this.isShadowField(field) || isCompilerSyntheticField(field)) {
+                continue;
+            }
+            String desc = remap ? this.mappingResolver.mapDescriptor(field.desc) : field.desc;
+            this.mixinFields.add(new FieldNode(field.access, field.name, desc, field.signature, field.value));
+        }
+    }
+
     private void scanShadowFields(ClassNode classNode, boolean remap) {
         for (FieldNode field : classNode.fields) {
-            AnnotationNode annotation = MixinAnnotationUtils.findAnnotation(
-                    field.visibleAnnotations,
-                    field.invisibleAnnotations,
-                    MixinConstants.SHADOW_CLASS);
+            AnnotationNode annotation = this.findShadowAnnotation(field);
             if (annotation == null) {
                 continue;
             }
@@ -118,6 +148,7 @@ final class TransformerHolder {
 
         this.registerInjectPoints(method, scan.injects);
         this.registerOverwritePoints(method, scan.overwrites);
+        this.registerMixinMethod(method, scan);
         this.cacheRewrittenMethod(method, mixinInternal);
     }
 
@@ -128,6 +159,9 @@ final class TransformerHolder {
     private void scanMethodAnnotation(MethodNode method, AnnotationNode annotation, String mixinInternal,
                                       boolean remap, MethodScan scan) {
         String desc = annotation.desc;
+        if (isSeraMixinMethodAnnotation(desc)) {
+            scan.hasSeraMixinAnnotation = true;
+        }
         if (MixinConstants.SHADOW_CLASS.equals(desc)) {
             this.registerShadowMethod(method, annotation, remap);
             return;
@@ -157,6 +191,16 @@ final class TransformerHolder {
         }
     }
 
+    private void registerMixinMethod(MethodNode method, MethodScan scan) {
+        if (scan.hasSeraMixinAnnotation || isConstructorOrClassInitializer(method)) {
+            return;
+        }
+        if ((method.access & (Opcodes.ACC_ABSTRACT | Opcodes.ACC_NATIVE)) != 0) {
+            return;
+        }
+        this.mixinMethods.add(this.cloneMethod(method));
+    }
+
     private void registerShadowMethod(MethodNode method, AnnotationNode annotation, boolean remap) {
         ShadowMethodInfo shadowMethodInfo = this.getShadowMethodInfo(method, annotation, remap);
         putValue(this.shadowMethods, method.name + method.desc, shadowMethodInfo);
@@ -182,6 +226,55 @@ final class TransformerHolder {
         MethodNode clonedMethod = this.cloneMethod(method);
         this.rewriteShadowReferences(clonedMethod, mixinInternal);
         putValue(this.rewrittenMethodCache, method.name + method.desc, clonedMethod);
+    }
+
+    private void scanInstanceFieldInitializers(ClassNode classNode, String mixinInternal) {
+        if (this.mixinFields.isEmpty()) {
+            return;
+        }
+        LinkedHashSet<String> instanceFieldNames = new LinkedHashSet<>();
+        for (FieldNode field : this.mixinFields) {
+            if ((field.access & Opcodes.ACC_STATIC) == 0) {
+                instanceFieldNames.add(field.name);
+            }
+        }
+        if (instanceFieldNames.isEmpty()) {
+            return;
+        }
+
+        for (MethodNode method : classNode.methods) {
+            if ("<init>".equals(method.name) && "()V".equals(method.desc)) {
+                InsnList initializer = this.copyInstanceFieldInitializer(method, classNode, mixinInternal, instanceFieldNames);
+                if (initializer != null && initializer.size() > 0) {
+                    this.instanceFieldInitializers.add(initializer);
+                }
+                return;
+            }
+        }
+    }
+
+    private InsnList copyInstanceFieldInitializer(MethodNode method, ClassNode classNode, String mixinInternal,
+                                                  LinkedHashSet<String> instanceFieldNames) {
+        AbstractInsnNode initCall = findConstructorInitCall(method, classNode);
+        if (initCall == null) {
+            return null;
+        }
+        ArrayList<AbstractInsnNode> nodes = new ArrayList<>();
+        boolean writesCopiedField = false;
+        for (AbstractInsnNode node = initCall.getNext(); node != null; node = node.getNext()) {
+            int opcode = node.getOpcode();
+            if (opcode >= Opcodes.IRETURN && opcode <= Opcodes.RETURN) {
+                break;
+            }
+            nodes.add(node);
+            if (node instanceof FieldInsnNode fieldInsn
+                    && fieldInsn.getOpcode() == Opcodes.PUTFIELD
+                    && mixinInternal.equals(fieldInsn.owner)
+                    && instanceFieldNames.contains(fieldInsn.name)) {
+                writesCopiedField = true;
+            }
+        }
+        return writesCopiedField ? cloneInstructions(nodes) : null;
     }
 
     private List<InjectInfo> readInjectPoints(AnnotationNode annotation, InsertPosition defaultPosition,
@@ -662,6 +755,48 @@ final class TransformerHolder {
         return null;
     }
 
+    private boolean isShadowField(FieldNode field) {
+        return this.findShadowAnnotation(field) != null;
+    }
+
+    private AnnotationNode findShadowAnnotation(FieldNode field) {
+        return MixinAnnotationUtils.findAnnotation(
+                field.visibleAnnotations,
+                field.invisibleAnnotations,
+                MixinConstants.SHADOW_CLASS);
+    }
+
+    private static boolean isCompilerSyntheticField(FieldNode field) {
+        return "$assertionsDisabled".equals(field.name);
+    }
+
+    private static boolean isConstructorOrClassInitializer(MethodNode method) {
+        return "<init>".equals(method.name) || "<clinit>".equals(method.name);
+    }
+
+    private static boolean isSeraMixinMethodAnnotation(String desc) {
+        return MixinConstants.SHADOW_CLASS.equals(desc)
+                || MixinConstants.RETURN_FIELD_CLASS.equals(desc)
+                || MixinConstants.INJECT_CLASS.equals(desc)
+                || MixinConstants.INJECT_POINT_CLASS.equals(desc)
+                || MixinConstants.ASM_CLASS.equals(desc)
+                || MixinConstants.REDIRECT_CLASS.equals(desc)
+                || MixinConstants.OVERWRITE_CLASS.equals(desc);
+    }
+
+    private static AbstractInsnNode findConstructorInitCall(MethodNode method, ClassNode classNode) {
+        String superName = classNode == null ? null : classNode.superName;
+        for (AbstractInsnNode node : method.instructions.toArray()) {
+            if (node instanceof MethodInsnNode methodInsn
+                    && methodInsn.getOpcode() == Opcodes.INVOKESPECIAL
+                    && "<init>".equals(methodInsn.name)
+                    && methodInsn.owner.equals(superName)) {
+                return methodInsn;
+            }
+        }
+        return null;
+    }
+
     /**
      * Performs an ASM method clone with fresh labels so inserted bytecode does
      * not share mutable instruction metadata with the original mixin method.
@@ -698,6 +833,20 @@ final class TransformerHolder {
         return copy;
     }
 
+    private static InsnList cloneInstructions(List<AbstractInsnNode> nodes) {
+        InsnList copy = new InsnList();
+        HashMap<LabelNode, LabelNode> labelMap = new HashMap<>();
+        for (AbstractInsnNode insn : nodes) {
+            if (insn instanceof LabelNode label) {
+                putValue(labelMap, label, new LabelNode());
+            }
+        }
+        for (AbstractInsnNode insn : nodes) {
+            copy.add(insn.clone(labelMap));
+        }
+        return copy;
+    }
+
     private boolean shadowHeaderPrinted() {
         return Boolean.TRUE.equals(this.hasPrintedShadowHeader.get());
     }
@@ -729,6 +878,7 @@ final class TransformerHolder {
         private final ArrayList<InjectInfo> injects = new ArrayList<>();
         private final ArrayList<OverwriteInfo> overwrites = new ArrayList<>();
         private CustomInjectInfo customInjectPoint;
+        private boolean hasSeraMixinAnnotation;
     }
 
     private static final class ReturnFieldTargetSpec {

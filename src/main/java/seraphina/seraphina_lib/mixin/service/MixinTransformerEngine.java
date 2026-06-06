@@ -7,6 +7,7 @@ import org.objectweb.asm.Type;
 import org.objectweb.asm.tree.AbstractInsnNode;
 import org.objectweb.asm.tree.ClassNode;
 import org.objectweb.asm.tree.FieldInsnNode;
+import org.objectweb.asm.tree.FieldNode;
 import org.objectweb.asm.tree.InsnList;
 import org.objectweb.asm.tree.InsnNode;
 import org.objectweb.asm.tree.InvokeDynamicInsnNode;
@@ -201,6 +202,7 @@ final class MixinTransformerEngine {
         anyMatched |= this.applyInjectTransforms(classNode, holder, loader, actualClassName, injectionState);
         appendPendingMethods(classNode, injectHandlerMethodsToAdd);
         anyMatched |= this.applyRedirectTransforms(classNode, holder, mixinInternal);
+        anyMatched |= this.applyMixinMembers(classNode, holder, mixinInternal, actualClassName);
         return anyMatched;
     }
 
@@ -246,6 +248,105 @@ final class MixinTransformerEngine {
             }
         }
         return changed;
+    }
+
+    private boolean applyMixinMembers(ClassNode classNode, TransformerHolder holder, String mixinInternal,
+                                      String actualClassName) throws IOException {
+        boolean changed = false;
+        changed |= this.applyMixinInterfaces(classNode, holder);
+        changed |= this.applyMixinFields(classNode, holder, mixinInternal, actualClassName);
+        changed |= this.applyMixinFieldInitializers(classNode, holder, mixinInternal, actualClassName);
+        changed |= this.applyMixinMethods(classNode, holder, mixinInternal, actualClassName);
+        return changed;
+    }
+
+    private boolean applyMixinInterfaces(ClassNode classNode, TransformerHolder holder) {
+        if (holder.interfaceInternalNames.isEmpty()) {
+            return false;
+        }
+        if (classNode.interfaces == null) {
+            classNode.interfaces = new ArrayList<>();
+        }
+        boolean changed = false;
+        for (String interfaceName : holder.interfaceInternalNames) {
+            if (!classNode.interfaces.contains(interfaceName)) {
+                classNode.interfaces.add(interfaceName);
+                changed = true;
+            }
+        }
+        return changed;
+    }
+
+    private boolean applyMixinFields(ClassNode classNode, TransformerHolder holder, String mixinInternal,
+                                     String actualClassName) {
+        boolean changed = false;
+        for (FieldNode field : holder.mixinFields) {
+            FieldNode cloned = cloneMixinField(field, mixinInternal, actualClassName);
+            if (this.hasField(classNode, cloned.name, cloned.desc)) {
+                continue;
+            }
+            classNode.fields.add(cloned);
+            changed = true;
+        }
+        return changed;
+    }
+
+    private static FieldNode cloneMixinField(FieldNode field, String mixinInternal, String targetInternal) {
+        return new FieldNode(
+                field.access,
+                field.name,
+                rewriteText(field.desc, mixinInternal, targetInternal),
+                rewriteText(field.signature, mixinInternal, targetInternal),
+                field.value);
+    }
+
+    private boolean applyMixinFieldInitializers(ClassNode classNode, TransformerHolder holder, String mixinInternal,
+                                                String actualClassName) {
+        if (holder.instanceFieldInitializers.isEmpty()) {
+            return false;
+        }
+        boolean changed = false;
+        SelfRewriteContext rewriteContext = new SelfRewriteContext(mixinInternal, actualClassName,
+                holder.shadowFields, holder.shadowMethods);
+        for (MethodNode method : classNode.methods) {
+            if (!isConstructor(method)) {
+                continue;
+            }
+            AbstractInsnNode initCall = findSuperConstructorInitCall(method, classNode);
+            if (initCall == null) {
+                continue;
+            }
+            InsnList initializer = new InsnList();
+            for (InsnList mixinInitializer : holder.instanceFieldInitializers) {
+                initializer.add(cloneInsnList(mixinInitializer));
+            }
+            this.rewriteSelfInstructions(initializer, rewriteContext);
+            method.instructions.insert(initCall, initializer);
+            changed = true;
+        }
+        return changed;
+    }
+
+    private boolean applyMixinMethods(ClassNode classNode, TransformerHolder holder, String mixinInternal,
+                                      String actualClassName) throws IOException {
+        ArrayList<MethodNode> methodsToAdd = new ArrayList<>();
+        MixinCopyContext copyContext = new MixinCopyContext(classNode, holder, actualClassName, mixinInternal, methodsToAdd);
+        for (MethodNode mixinMethod : holder.mixinMethods) {
+            MethodNode cloned = holder.cloneMethod(mixinMethod);
+            this.rewriteSelfReferences(cloned, copyContext.selfRewriteContext());
+            cloned.access &= ~(Opcodes.ACC_ABSTRACT | Opcodes.ACC_NATIVE);
+            cloned.visibleAnnotations = null;
+            cloned.invisibleAnnotations = null;
+            cloned.visibleParameterAnnotations = null;
+            cloned.invisibleParameterAnnotations = null;
+            if (this.hasMethod(classNode, methodsToAdd, cloned.name, cloned.desc)) {
+                continue;
+            }
+            methodsToAdd.add(cloned);
+            this.copyLambdaMethods(holder.mixinClassName, mixinMethod.name, copyContext);
+        }
+        appendPendingMethods(classNode, methodsToAdd);
+        return !methodsToAdd.isEmpty();
     }
 
     private boolean applyRedirectToMethod(MethodNode method, RedirectPoint point, String mixinInternal) {
@@ -321,19 +422,25 @@ final class MixinTransformerEngine {
      * references to the class currently being transformed.
      */
     private void rewriteSelfReferences(MethodNode method, SelfRewriteContext context) {
-        if (method.desc.contains(context.mixinInternal)) {
-            method.desc = method.desc.replace(context.mixinInternal, context.targetInternal);
+        method.desc = rewriteText(method.desc, context.mixinInternal, context.targetInternal);
+        method.signature = rewriteText(method.signature, context.mixinInternal, context.targetInternal);
+        if (method.exceptions != null) {
+            for (int i = 0; i < method.exceptions.size(); i++) {
+                method.exceptions.set(i, rewriteText(method.exceptions.get(i), context.mixinInternal, context.targetInternal));
+            }
         }
-        InsnList instructions = method.instructions;
+
+        this.rewriteSelfInstructions(method.instructions, context);
+        this.rewriteLocalVariables(method, context.mixinInternal, context.targetInternal);
+    }
+
+    private void rewriteSelfInstructions(InsnList instructions, SelfRewriteContext context) {
         if (instructions == null) {
             return;
         }
-
         for (AbstractInsnNode node : instructions.toArray()) {
             this.rewriteSelfInstruction(instructions, node, context);
         }
-
-        this.rewriteLocalVariables(method, context.mixinInternal, context.targetInternal);
     }
 
     private void rewriteSelfInstruction(InsnList instructions, AbstractInsnNode node, SelfRewriteContext context) {
@@ -358,6 +465,7 @@ final class MixinTransformerEngine {
         if (field.owner.equals(context.mixinInternal)) {
             field.owner = context.targetInternal;
         }
+        field.desc = rewriteText(field.desc, context.mixinInternal, context.targetInternal);
         ShadowFieldInfo shadowField = context.shadowFields.get(field.name);
         if (shadowField != null) {
             field.name = shadowField.targetFieldName;
@@ -367,10 +475,12 @@ final class MixinTransformerEngine {
     }
 
     private void rewriteSelfMethodReference(InsnList instructions, MethodInsnNode methodCall, SelfRewriteContext context) {
+        String originalDesc = methodCall.desc;
+        methodCall.desc = rewriteText(methodCall.desc, context.mixinInternal, context.targetInternal);
         if (!methodCall.owner.equals(context.mixinInternal)) {
             return;
         }
-        ShadowMethodInfo shadowMethod = context.shadowMethods.get(methodCall.name + methodCall.desc);
+        ShadowMethodInfo shadowMethod = context.shadowMethods.get(methodCall.name + originalDesc);
         if (shadowMethod != null) {
             this.rewriteShadowMethodCall(instructions, methodCall, shadowMethod);
         } else if (isLambdaMethodName(methodCall.name) && methodCall.getOpcode() != Opcodes.INVOKESTATIC) {
@@ -389,9 +499,7 @@ final class MixinTransformerEngine {
     }
 
     private static void rewriteSelfTypeReference(TypeInsnNode typeInsn, String mixinInternal, String targetInternal) {
-        if (typeInsn.desc.equals(mixinInternal)) {
-            typeInsn.desc = targetInternal;
-        }
+        typeInsn.desc = rewriteText(typeInsn.desc, mixinInternal, targetInternal);
     }
 
     private static void rewriteLocalVariables(MethodNode method, String mixinInternal, String targetInternal) {
@@ -825,6 +933,19 @@ final class MixinTransformerEngine {
         return null;
     }
 
+    private static AbstractInsnNode findSuperConstructorInitCall(MethodNode target, ClassNode classNode) {
+        String superName = classNode == null ? null : classNode.superName;
+        for (AbstractInsnNode node : target.instructions.toArray()) {
+            if (node instanceof MethodInsnNode methodInsn
+                    && methodInsn.getOpcode() == Opcodes.INVOKESPECIAL
+                    && "<init>".equals(methodInsn.name)
+                    && methodInsn.owner.equals(superName)) {
+                return methodInsn;
+            }
+        }
+        return null;
+    }
+
     private InjectHandlerCall ensureInjectHandlerMethod(InjectPoint point, InjectContext context, String mixinInternal,
                                                         boolean targetIsInstance) throws NoSuchMethodException, IOException {
         if (!targetIsInstance) {
@@ -884,6 +1005,15 @@ final class MixinTransformerEngine {
         }
         for (MethodNode method : pendingMethods) {
             if (method.name.equals(name) && method.desc.equals(desc)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean hasField(ClassNode classNode, String name, String desc) {
+        for (FieldNode field : classNode.fields) {
+            if (field.name.equals(name) && field.desc.equals(desc)) {
                 return true;
             }
         }
@@ -1109,6 +1239,13 @@ final class MixinTransformerEngine {
             copy.add(insn.clone(labels));
         }
         return copy;
+    }
+
+    private static String rewriteText(String value, String mixinInternal, String targetInternal) {
+        if (value == null || mixinInternal == null || targetInternal == null || !value.contains(mixinInternal)) {
+            return value;
+        }
+        return value.replace(mixinInternal, targetInternal);
     }
 
     private static void acceptExpandedClass(byte[] classBytes, ClassNode classNode) {
