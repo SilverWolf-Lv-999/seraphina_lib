@@ -277,3 +277,43 @@ final class ReturnFieldPoint {
         this.write = write;
     }
 }
+
+final class AccessorPoint {
+    final String mixinMethodName;
+    final String mixinMethodDesc;
+    final int mixinMethodAccess;
+    final String targetFieldName;
+    final String targetFieldDesc;
+    final boolean targetStatic;
+    final boolean setter;
+
+    AccessorPoint(String mixinMethodName, String mixinMethodDesc, int mixinMethodAccess,
+                  String targetFieldName, String targetFieldDesc, boolean targetStatic, boolean setter) {
+        this.mixinMethodName = mixinMethodName;
+        this.mixinMethodDesc = mixinMethodDesc;
+        this.mixinMethodAccess = mixinMethodAccess;
+        this.targetFieldName = targetFieldName;
+        this.targetFieldDesc = targetFieldDesc;
+        this.targetStatic = targetStatic;
+        this.setter = setter;
+    }
+}
+
+final class InvokerPoint {
+    final String mixinMethodName;
+    final String mixinMethodDesc;
+    final int mixinMethodAccess;
+    final String targetMethodName;
+    final String targetMethodDesc;
+    final boolean targetStatic;
+
+    InvokerPoint(String mixinMethodName, String mixinMethodDesc, int mixinMethodAccess,
+                 String targetMethodName, String targetMethodDesc, boolean targetStatic) {
+        this.mixinMethodName = mixinMethodName;
+        this.mixinMethodDesc = mixinMethodDesc;
+        this.mixinMethodAccess = mixinMethodAccess;
+        this.targetMethodName = targetMethodName;
+        this.targetMethodDesc = targetMethodDesc;
+        this.targetStatic = targetStatic;
+    }
+}

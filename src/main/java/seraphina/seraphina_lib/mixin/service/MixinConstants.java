@@ -1,9 +1,11 @@
 package seraphina.seraphina_lib.mixin.service;
 
 import org.objectweb.asm.Type;
+import seraphina.seraphina_lib.mixin.annotation.Accessor;
 import seraphina.seraphina_lib.mixin.annotation.ASM;
 import seraphina.seraphina_lib.mixin.annotation.Inject;
 import seraphina.seraphina_lib.mixin.annotation.InjectPoint;
+import seraphina.seraphina_lib.mixin.annotation.Invoker;
 import seraphina.seraphina_lib.mixin.annotation.NoReMapping;
 import seraphina.seraphina_lib.mixin.annotation.Overwrite;
 import seraphina.seraphina_lib.mixin.annotation.Redirect;
@@ -16,6 +18,8 @@ import seraphina.seraphina_lib.service.ISeraMixin;
 final class MixinConstants {
     static final String SERVICE_FILE = "META-INF/services/" + ISeraMixin.class.getName();
     static final String SHADOW_CLASS = Type.getDescriptor(Shadow.class);
+    static final String ACCESSOR_CLASS = Type.getDescriptor(Accessor.class);
+    static final String INVOKER_CLASS = Type.getDescriptor(Invoker.class);
     static final String INJECT_CLASS = Type.getDescriptor(Inject.class);
     static final String INJECT_POINT_CLASS = Type.getDescriptor(InjectPoint.class);
     static final String ASM_CLASS = Type.getDescriptor(ASM.class);

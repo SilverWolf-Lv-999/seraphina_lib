@@ -40,6 +40,8 @@ final class TransformerHolder {
     final List<OverwritePoint> overwritePoints = new ArrayList<>();
     final List<RedirectPoint> redirectPoints = new ArrayList<>();
     final List<ReturnFieldPoint> returnFieldPoints = new ArrayList<>();
+    final List<AccessorPoint> accessorPoints = new ArrayList<>();
+    final List<InvokerPoint> invokerPoints = new ArrayList<>();
     final List<String> interfaceInternalNames = new ArrayList<>();
     final List<FieldNode> mixinFields = new ArrayList<>();
     final List<MethodNode> mixinMethods = new ArrayList<>();
@@ -92,6 +94,9 @@ final class TransformerHolder {
     }
 
     private void scanInterfaces(ClassNode classNode, boolean remap) {
+        if ((classNode.access & Opcodes.ACC_INTERFACE) != 0) {
+            this.addInterfaceName(classNode.name, false);
+        }
         if (classNode.interfaces == null || classNode.interfaces.isEmpty()) {
             return;
         }
@@ -100,10 +105,14 @@ final class TransformerHolder {
             if (interfaceName == null || interfaceName.isBlank()) {
                 continue;
             }
-            String mappedName = remap ? this.mappingResolver.mapClassName(interfaceName) : interfaceName;
-            if (!this.targetInternalName.equals(mappedName) && !this.interfaceInternalNames.contains(mappedName)) {
-                this.interfaceInternalNames.add(mappedName);
-            }
+            this.addInterfaceName(interfaceName, remap);
+        }
+    }
+
+    private void addInterfaceName(String interfaceName, boolean remap) {
+        String mappedName = remap ? this.mappingResolver.mapClassName(interfaceName) : interfaceName;
+        if (!this.targetInternalName.equals(mappedName) && !this.interfaceInternalNames.contains(mappedName)) {
+            this.interfaceInternalNames.add(mappedName);
         }
     }
 
@@ -166,6 +175,14 @@ final class TransformerHolder {
             this.registerShadowMethod(method, annotation, remap);
             return;
         }
+        if (MixinConstants.ACCESSOR_CLASS.equals(desc)) {
+            this.registerAccessorPoint(method, annotation, remap);
+            return;
+        }
+        if (MixinConstants.INVOKER_CLASS.equals(desc)) {
+            this.registerInvokerPoint(method, annotation, remap);
+            return;
+        }
         if (MixinConstants.RETURN_FIELD_CLASS.equals(desc)) {
             this.addReturnFieldPoints(method, annotation, mixinInternal, remap);
             return;
@@ -205,6 +222,66 @@ final class TransformerHolder {
         ShadowMethodInfo shadowMethodInfo = this.getShadowMethodInfo(method, annotation, remap);
         putValue(this.shadowMethods, method.name + method.desc, shadowMethodInfo);
         this.ensureShadowHeader();
+    }
+
+    private void registerAccessorPoint(MethodNode method, AnnotationNode annotation, boolean remap) {
+        AccessorSpec spec = this.readAccessorSpec(method, annotation);
+        if (spec == null) {
+            return;
+        }
+        String targetFieldName = spec.fieldName;
+        String targetFieldDesc = spec.fieldDesc;
+        if (remap) {
+            targetFieldName = this.mappingResolver.mapFieldName(this.targetInternalName, targetFieldName);
+            targetFieldDesc = this.mappingResolver.mapDescriptor(targetFieldDesc);
+        }
+        this.accessorPoints.add(new AccessorPoint(method.name, method.desc, method.access,
+                targetFieldName, targetFieldDesc, spec.targetStatic, spec.setter));
+    }
+
+    private AccessorSpec readAccessorSpec(MethodNode method, AnnotationNode annotation) {
+        String fieldName = MixinAnnotationUtils.annotationStringValue(annotation, "value", "");
+        if (fieldName.isBlank()) {
+            fieldName = inferAccessorTargetName(method.name);
+        }
+        boolean targetStatic = MixinAnnotationUtils.annotationBooleanValue(annotation, "isStatic", false);
+        Type methodType = Type.getMethodType(method.desc);
+        Type[] args = methodType.getArgumentTypes();
+        Type returnType = methodType.getReturnType();
+        boolean setter = returnType.getSort() == Type.VOID;
+        if (setter) {
+            if (args.length != 1) {
+                this.reportInvalidAccessor(method, "setter must accept exactly one argument");
+                return null;
+            }
+            return new AccessorSpec(fieldName, args[0].getDescriptor(), targetStatic, true);
+        }
+        if (args.length != 0) {
+            this.reportInvalidAccessor(method, "getter must not accept arguments");
+            return null;
+        }
+        return new AccessorSpec(fieldName, returnType.getDescriptor(), targetStatic, false);
+    }
+
+    private void registerInvokerPoint(MethodNode method, AnnotationNode annotation, boolean remap) {
+        String targetMethodName = MixinAnnotationUtils.annotationStringValue(annotation, "value", "");
+        if (targetMethodName.isBlank()) {
+            targetMethodName = inferInvokerTargetName(method.name);
+        }
+        if ("<init>".equals(targetMethodName)) {
+            System.err.println("[SeraMixin] @Invoker does not support constructor invokers yet: "
+                    + this.mixinClassName + "." + method.name + method.desc);
+            return;
+        }
+        String targetMethodDesc = MixinAnnotationUtils.annotationStringValue(annotation, "desc", method.desc);
+        boolean targetStatic = MixinAnnotationUtils.annotationBooleanValue(annotation, "isStatic", false);
+        if (remap) {
+            MappedMethod mapped = this.mappingResolver.mapMethod(this.targetInternalName, targetMethodName, targetMethodDesc);
+            targetMethodName = mapped.name();
+            targetMethodDesc = mapped.desc();
+        }
+        this.invokerPoints.add(new InvokerPoint(method.name, method.desc, method.access,
+                targetMethodName, targetMethodDesc, targetStatic));
     }
 
     private void registerInjectPoints(MethodNode method, List<InjectInfo> injects) {
@@ -776,12 +853,59 @@ final class TransformerHolder {
 
     private static boolean isSeraMixinMethodAnnotation(String desc) {
         return MixinConstants.SHADOW_CLASS.equals(desc)
+                || MixinConstants.ACCESSOR_CLASS.equals(desc)
+                || MixinConstants.INVOKER_CLASS.equals(desc)
                 || MixinConstants.RETURN_FIELD_CLASS.equals(desc)
                 || MixinConstants.INJECT_CLASS.equals(desc)
                 || MixinConstants.INJECT_POINT_CLASS.equals(desc)
                 || MixinConstants.ASM_CLASS.equals(desc)
                 || MixinConstants.REDIRECT_CLASS.equals(desc)
                 || MixinConstants.OVERWRITE_CLASS.equals(desc);
+    }
+
+    private void reportInvalidAccessor(MethodNode method, String reason) {
+        System.err.println("[SeraMixin] Invalid @Accessor on "
+                + this.mixinClassName + "." + method.name + method.desc + ": " + reason);
+    }
+
+    private static String inferAccessorTargetName(String methodName) {
+        String simpleName = suffixAfterLastDollar(methodName);
+        if (simpleName.startsWith("get") && simpleName.length() > 3) {
+            return decapitalize(simpleName.substring(3));
+        }
+        if (simpleName.startsWith("is") && simpleName.length() > 2) {
+            return decapitalize(simpleName.substring(2));
+        }
+        if (simpleName.startsWith("set") && simpleName.length() > 3) {
+            return decapitalize(simpleName.substring(3));
+        }
+        return simpleName;
+    }
+
+    private static String inferInvokerTargetName(String methodName) {
+        String simpleName = suffixAfterLastDollar(methodName);
+        if (simpleName.startsWith("invoke") && simpleName.length() > 6) {
+            return decapitalize(simpleName.substring(6));
+        }
+        if (simpleName.startsWith("call") && simpleName.length() > 4) {
+            return decapitalize(simpleName.substring(4));
+        }
+        return simpleName;
+    }
+
+    private static String suffixAfterLastDollar(String methodName) {
+        int index = methodName.lastIndexOf('$');
+        return index >= 0 && index + 1 < methodName.length() ? methodName.substring(index + 1) : methodName;
+    }
+
+    private static String decapitalize(String value) {
+        if (value == null || value.isEmpty()) {
+            return value;
+        }
+        if (value.length() > 1 && Character.isUpperCase(value.charAt(0)) && Character.isUpperCase(value.charAt(1))) {
+            return value;
+        }
+        return Character.toLowerCase(value.charAt(0)) + value.substring(1);
     }
 
     private static AbstractInsnNode findConstructorInitCall(MethodNode method, ClassNode classNode) {
@@ -915,6 +1039,9 @@ final class TransformerHolder {
     }
 
     private record ReturnFieldSpec(List<String> fields, String fieldDesc, boolean isStatic, boolean read, boolean write) {
+    }
+
+    private record AccessorSpec(String fieldName, String fieldDesc, boolean targetStatic, boolean setter) {
     }
 
     private record CustomInjectInfo(InsertPosition at, InjectionSelector selector) {

@@ -256,6 +256,7 @@ final class MixinTransformerEngine {
         changed |= this.applyMixinInterfaces(classNode, holder);
         changed |= this.applyMixinFields(classNode, holder, mixinInternal, actualClassName);
         changed |= this.applyMixinFieldInitializers(classNode, holder, mixinInternal, actualClassName);
+        changed |= this.applyAccessorAndInvokerMethods(classNode, holder, actualClassName);
         changed |= this.applyMixinMethods(classNode, holder, mixinInternal, actualClassName);
         return changed;
     }
@@ -275,6 +276,147 @@ final class MixinTransformerEngine {
             }
         }
         return changed;
+    }
+
+    private boolean applyAccessorAndInvokerMethods(ClassNode classNode, TransformerHolder holder, String actualClassName) {
+        if (holder.accessorPoints.isEmpty() && holder.invokerPoints.isEmpty()) {
+            return false;
+        }
+        ArrayList<MethodNode> methodsToAdd = new ArrayList<>();
+        for (AccessorPoint point : holder.accessorPoints) {
+            MethodNode generated = this.generateAccessorMethod(point, actualClassName);
+            if (generated == null || this.hasMethod(classNode, methodsToAdd, generated.name, generated.desc)) {
+                continue;
+            }
+            methodsToAdd.add(generated);
+        }
+        for (InvokerPoint point : holder.invokerPoints) {
+            MethodNode generated = this.generateInvokerMethod(point, classNode, actualClassName);
+            if (generated == null || this.hasMethod(classNode, methodsToAdd, generated.name, generated.desc)) {
+                continue;
+            }
+            methodsToAdd.add(generated);
+        }
+        appendPendingMethods(classNode, methodsToAdd);
+        return !methodsToAdd.isEmpty();
+    }
+
+    private MethodNode generateAccessorMethod(AccessorPoint point, String targetInternal) {
+        boolean bridgeStatic = (point.mixinMethodAccess & Opcodes.ACC_STATIC) != 0;
+        if (bridgeStatic && !point.targetStatic) {
+            this.reportInvalidBridge("@Accessor", point.mixinMethodName, point.mixinMethodDesc,
+                    "static bridge cannot access an instance field");
+            return null;
+        }
+        if (!this.isAccessorDescriptorCompatible(point)) {
+            this.reportInvalidBridge("@Accessor", point.mixinMethodName, point.mixinMethodDesc,
+                    "method descriptor does not match target field type " + point.targetFieldDesc);
+            return null;
+        }
+
+        MethodNode method = new MethodNode(sanitizeBridgeAccess(point.mixinMethodAccess),
+                point.mixinMethodName, point.mixinMethodDesc, null, null);
+        if (point.setter) {
+            this.writeAccessorSetter(method, point, bridgeStatic, targetInternal);
+        } else {
+            this.writeAccessorGetter(method, point, targetInternal);
+        }
+        method.maxLocals = bridgeLocalSlots(point.mixinMethodDesc, bridgeStatic);
+        method.maxStack = 0;
+        return method;
+    }
+
+    private boolean isAccessorDescriptorCompatible(AccessorPoint point) {
+        Type bridgeType = Type.getMethodType(point.mixinMethodDesc);
+        Type fieldType = Type.getType(point.targetFieldDesc);
+        Type[] args = bridgeType.getArgumentTypes();
+        if (point.setter) {
+            return bridgeType.getReturnType().getSort() == Type.VOID
+                    && args.length == 1
+                    && isSameStackType(args[0], fieldType);
+        }
+        return args.length == 0 && isSameStackType(bridgeType.getReturnType(), fieldType);
+    }
+
+    private void writeAccessorGetter(MethodNode method, AccessorPoint point, String targetInternal) {
+        if (!point.targetStatic) {
+            method.instructions.add(new VarInsnNode(Opcodes.ALOAD, 0));
+        }
+        method.instructions.add(new FieldInsnNode(point.targetStatic ? Opcodes.GETSTATIC : Opcodes.GETFIELD,
+                targetInternal, point.targetFieldName, point.targetFieldDesc));
+        method.instructions.add(returnInsn(Type.getReturnType(point.mixinMethodDesc)));
+    }
+
+    private void writeAccessorSetter(MethodNode method, AccessorPoint point, boolean bridgeStatic, String targetInternal) {
+        Type fieldType = Type.getType(point.targetFieldDesc);
+        int valueIndex = bridgeStatic ? 0 : 1;
+        if (!point.targetStatic) {
+            method.instructions.add(new VarInsnNode(Opcodes.ALOAD, 0));
+        }
+        method.instructions.add(this.getLoadInsn(fieldType, valueIndex));
+        method.instructions.add(new FieldInsnNode(point.targetStatic ? Opcodes.PUTSTATIC : Opcodes.PUTFIELD,
+                targetInternal, point.targetFieldName, point.targetFieldDesc));
+        method.instructions.add(new InsnNode(Opcodes.RETURN));
+    }
+
+    private MethodNode generateInvokerMethod(InvokerPoint point, ClassNode classNode, String targetInternal) {
+        boolean bridgeStatic = (point.mixinMethodAccess & Opcodes.ACC_STATIC) != 0;
+        if (bridgeStatic && !point.targetStatic) {
+            this.reportInvalidBridge("@Invoker", point.mixinMethodName, point.mixinMethodDesc,
+                    "static bridge cannot invoke an instance method");
+            return null;
+        }
+        if (!this.isInvokerDescriptorCompatible(point)) {
+            this.reportInvalidBridge("@Invoker", point.mixinMethodName, point.mixinMethodDesc,
+                    "method descriptor does not match target method descriptor " + point.targetMethodDesc);
+            return null;
+        }
+
+        MethodNode method = new MethodNode(sanitizeBridgeAccess(point.mixinMethodAccess),
+                point.mixinMethodName, point.mixinMethodDesc, null, null);
+        if (!point.targetStatic) {
+            method.instructions.add(new VarInsnNode(Opcodes.ALOAD, 0));
+        }
+        Type[] args = Type.getArgumentTypes(point.mixinMethodDesc);
+        int localIndex = bridgeStatic ? 0 : 1;
+        for (Type arg : args) {
+            method.instructions.add(this.getLoadInsn(arg, localIndex));
+            localIndex += arg.getSize();
+        }
+        int opcode = this.invokerOpcode(point, classNode);
+        method.instructions.add(new MethodInsnNode(opcode, targetInternal, point.targetMethodName, point.targetMethodDesc,
+                opcode == Opcodes.INVOKEINTERFACE));
+        method.instructions.add(returnInsn(Type.getReturnType(point.mixinMethodDesc)));
+        method.maxLocals = bridgeLocalSlots(point.mixinMethodDesc, bridgeStatic);
+        method.maxStack = 0;
+        return method;
+    }
+
+    private boolean isInvokerDescriptorCompatible(InvokerPoint point) {
+        Type bridgeType = Type.getMethodType(point.mixinMethodDesc);
+        Type targetType = Type.getMethodType(point.targetMethodDesc);
+        Type[] bridgeArgs = bridgeType.getArgumentTypes();
+        Type[] targetArgs = targetType.getArgumentTypes();
+        if (bridgeArgs.length != targetArgs.length) {
+            return false;
+        }
+        for (int i = 0; i < bridgeArgs.length; i++) {
+            if (!isSameStackType(bridgeArgs[i], targetArgs[i])) {
+                return false;
+            }
+        }
+        return isSameStackType(bridgeType.getReturnType(), targetType.getReturnType());
+    }
+
+    private int invokerOpcode(InvokerPoint point, ClassNode classNode) {
+        if (point.targetStatic) {
+            return Opcodes.INVOKESTATIC;
+        }
+        MethodNode target = this.findMethod(classNode, point.targetMethodName, point.targetMethodDesc);
+        if (target != null && (target.access & Opcodes.ACC_PRIVATE) != 0) {
+            return Opcodes.INVOKESPECIAL;
+        }
+        return (classNode.access & Opcodes.ACC_INTERFACE) != 0 ? Opcodes.INVOKEINTERFACE : Opcodes.INVOKEVIRTUAL;
     }
 
     private boolean applyMixinFields(ClassNode classNode, TransformerHolder holder, String mixinInternal,
@@ -997,6 +1139,15 @@ final class MixinTransformerEngine {
         return candidate;
     }
 
+    private MethodNode findMethod(ClassNode classNode, String name, String desc) {
+        for (MethodNode method : classNode.methods) {
+            if (method.name.equals(name) && method.desc.equals(desc)) {
+                return method;
+            }
+        }
+        return null;
+    }
+
     private boolean hasMethod(ClassNode classNode, List<MethodNode> pendingMethods, String name, String desc) {
         for (MethodNode method : classNode.methods) {
             if (method.name.equals(name) && method.desc.equals(desc)) {
@@ -1009,6 +1160,41 @@ final class MixinTransformerEngine {
             }
         }
         return false;
+    }
+
+    private static int sanitizeBridgeAccess(int access) {
+        return (access & ~(Opcodes.ACC_ABSTRACT | Opcodes.ACC_NATIVE)) | Opcodes.ACC_SYNTHETIC;
+    }
+
+    private static int bridgeLocalSlots(String methodDesc, boolean bridgeStatic) {
+        int slots = bridgeStatic ? 0 : 1;
+        for (Type arg : Type.getArgumentTypes(methodDesc)) {
+            slots += arg.getSize();
+        }
+        return slots;
+    }
+
+    private static AbstractInsnNode returnInsn(Type type) {
+        return new InsnNode(type.getOpcode(Opcodes.IRETURN));
+    }
+
+    private static boolean isSameStackType(Type bridgeType, Type targetType) {
+        if (bridgeType.getSort() == Type.VOID || targetType.getSort() == Type.VOID) {
+            return bridgeType.getSort() == targetType.getSort();
+        }
+        if (isReferenceType(bridgeType) && isReferenceType(targetType)) {
+            return true;
+        }
+        return bridgeType.getSort() == targetType.getSort();
+    }
+
+    private static boolean isReferenceType(Type type) {
+        return type.getSort() == Type.OBJECT || type.getSort() == Type.ARRAY;
+    }
+
+    private void reportInvalidBridge(String annotationName, String methodName, String methodDesc, String reason) {
+        System.err.println("[SeraMixin] Invalid " + annotationName + " bridge "
+                + methodName + methodDesc + ": " + reason);
     }
 
     private boolean hasField(ClassNode classNode, String name, String desc) {

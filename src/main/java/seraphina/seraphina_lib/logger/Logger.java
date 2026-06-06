@@ -283,7 +283,7 @@ public class Logger {
 
     private static void initializeLogFile() {
         try {
-            Path dir = FMLPaths.GAMEDIR.get().resolve("silent_love_sword/log");
+            Path dir = FMLPaths.GAMEDIR.get().resolve("seraphina_lib/log");
             File logDir = dir.toFile();
             if (!logDir.exists()) {
                 boolean created = logDir.mkdirs();
