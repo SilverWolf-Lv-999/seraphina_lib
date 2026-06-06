@@ -54,7 +54,6 @@ public class SeraMixinLaunchPluginService implements ILaunchPluginService {
         this.serviceDiscovery = new MixinServiceDiscovery(this);
         currentService = this;
         this.drainPendingMixins();
-        this.ensureMixinServicesLoaded();
     }
 
     @Override

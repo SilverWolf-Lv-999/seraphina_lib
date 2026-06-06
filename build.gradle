@@ -18,7 +18,7 @@ java {
 
 minecraft {
     mappings channel: mapping_channel, version: mapping_version
-
+    accessTransformer = file('src/main/resources/META-INF/accesstransformer.cfg')
     copyIdeResources = true
 
     runs {
@@ -101,6 +101,86 @@ tasks.named('jar', Jar).configure {
     }
 
     finalizedBy 'reobfJar'
+}
+
+def devTransformationServiceModuleName = 'seraphina.lib.dev.transform.service'
+
+def generateDevTransformationServiceModuleInfo = tasks.register('generateDevTransformationServiceModuleInfo') {
+    def moduleInfoFile = layout.buildDirectory.file('generated/sources/devTransformationServiceModuleInfo/module-info.java')
+
+    outputs.file(moduleInfoFile)
+
+    doLast {
+        def file = moduleInfoFile.get().asFile
+        file.parentFile.mkdirs()
+        file.text = """module ${devTransformationServiceModuleName} {
+    requires cpw.mods.modlauncher;
+    requires cpw.mods.securejarhandler;
+    requires fmlloader;
+    requires java.instrument;
+    requires jdk.attach;
+    requires jdk.unsupported;
+    requires org.apache.commons.compress;
+    requires org.objectweb.asm;
+    requires org.objectweb.asm.commons;
+    requires org.objectweb.asm.tree;
+
+    uses seraphina.seraphina_lib.service.ISeraMixin;
+
+    provides cpw.mods.modlauncher.api.ITransformationService
+        with seraphina.seraphina_lib.mixin.service.SeraMixinTransformationService;
+    provides seraphina.seraphina_lib.service.ISeraMixin
+        with seraphina.seraphina_lib.mod.SeraLibMixin;
+}
+"""
+    }
+}
+
+def compileDevTransformationServiceModuleInfo = tasks.register('compileDevTransformationServiceModuleInfo', JavaCompile) {
+    dependsOn classes, generateDevTransformationServiceModuleInfo
+    source generateDevTransformationServiceModuleInfo.map { it.outputs.files }
+    destinationDirectory = layout.buildDirectory.dir('classes/java/devTransformationServiceModuleInfo')
+    classpath = files()
+
+    doFirst {
+        def modulePath = files(sourceSets.main.compileClasspath, sourceSets.main.runtimeClasspath)
+                .filter { it.isFile() && it.name.endsWith('.jar') }
+        options.compilerArgs = [
+                '--module-path', modulePath.asPath,
+                '--patch-module', "${devTransformationServiceModuleName}=${sourceSets.main.output.asPath}"
+        ]
+    }
+}
+
+def devTransformationServiceJar = tasks.register('devTransformationServiceJar', Jar) {
+    dependsOn compileDevTransformationServiceModuleInfo
+    archiveClassifier = 'dev-transform-service'
+    from sourceSets.main.output
+    from compileDevTransformationServiceModuleInfo.map { it.destinationDirectory }
+
+    // runClient supplies this project as exploded mod classes. This jar exists
+    // only so ModLauncher can discover META-INF/services before FML scans mods.
+    exclude 'META-INF/mods.toml', 'pack.mcmeta'
+
+    manifest {
+        attributes(["FMLModType": "LIBRARY"])
+    }
+}
+
+def installDevTransformationServiceJar = tasks.register('installDevTransformationServiceJar', Copy) {
+    dependsOn devTransformationServiceJar
+    from devTransformationServiceJar.flatMap { it.archiveFile }
+    into layout.projectDirectory.dir('run/mods')
+    rename { "${mod_id}-dev-transform-service.jar" }
+    doFirst {
+        delete file("run/mods/${mod_id}-dev-transform-service.jar")
+    }
+}
+
+tasks.withType(JavaExec).configureEach {
+    if (name == 'runClient') {
+        dependsOn installDevTransformationServiceJar
+    }
 }
 
 tasks.withType(JavaCompile).configureEach {

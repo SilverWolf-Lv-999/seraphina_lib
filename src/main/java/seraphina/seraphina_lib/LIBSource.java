@@ -1,9 +1,15 @@
 package seraphina.seraphina_lib;
 
+import com.mojang.brigadier.CommandDispatcher;
+import net.minecraft.commands.CommandSourceStack;
+import net.minecraftforge.common.MinecraftForge;
 import net.minecraftforge.fml.ModList;
 import net.minecraftforge.fml.common.Mod;
+import net.minecraftforge.fml.javafmlmod.FMLJavaModLoadingContext;
+import seraphina.seraphina_lib.forge.CommandInitEvent;
 import seraphina.seraphina_lib.logger.Logger;
 import seraphina.seraphina_lib.logger.LoggerFactory;
+import seraphina.seraphina_lib.mod.common.CommandUtil;
 import seraphina.seraphina_lib.util.ModUtil;
 import seraphina.seraphina_lib.util.ModuleUtil;
 
@@ -19,7 +25,8 @@ public class LIBSource {
     public static final String MOD_ID = "seraphina_lib";
     private static final Logger LOGGER = LoggerFactory.getLogger(LIBSource.class);
 
-    public LIBSource() {
+    public LIBSource(FMLJavaModLoadingContext context) {
+        MinecraftForge.EVENT_BUS.addListener(this::command);
         LOGGER.info("Seraphina Lib Initialized");
         if (ModUtil.isDevelopment()) {
             LOGGER.info("Development mode enabled");
@@ -28,6 +35,11 @@ public class LIBSource {
                 LOGGER.debug(" -{}", mod.getModId());
             });
         }
+    }
+
+    public void command(CommandInitEvent event) {
+        CommandDispatcher<CommandSourceStack> dispatcher = event.getDispatcher();
+        CommandUtil.registerCommands(dispatcher);
     }
 
     static {

@@ -9,7 +9,6 @@ import net.minecraft.commands.arguments.EntityArgument;
 import net.minecraft.commands.arguments.selector.EntitySelector;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
-import seraphina.seraphina_lib.util.entity.EntityDataInject;
 
 public class CommandUtil {
     public static void registerCommands(CommandDispatcher<CommandSourceStack> dispatcher) {
@@ -21,7 +20,7 @@ public class CommandUtil {
                                                 .executes(context -> {
                                                     Entity entity = EntityArgument.getEntity(context, "target");
                                                     if (entity instanceof LivingEntity livingEntity) {
-                                                        EntityDataInject.setDef(livingEntity, BoolArgumentType.getBool(context, "bool"));
+                                                        livingEntity.setInvulnerable(BoolArgumentType.getBool(context, "bool"));
                                                     }
                                                     return 4;
                                                 })

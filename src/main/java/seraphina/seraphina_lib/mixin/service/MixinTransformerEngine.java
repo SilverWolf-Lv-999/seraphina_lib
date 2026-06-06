@@ -373,7 +373,7 @@ final class MixinTransformerEngine {
         ShadowMethodInfo shadowMethod = context.shadowMethods.get(methodCall.name + methodCall.desc);
         if (shadowMethod != null) {
             this.rewriteShadowMethodCall(instructions, methodCall, shadowMethod);
-        } else if (methodCall.name.startsWith("lambda.") || methodCall.name.startsWith("lambda$")) {
+        } else if (isLambdaMethodName(methodCall.name) && methodCall.getOpcode() != Opcodes.INVOKESTATIC) {
             methodCall.setOpcode(Opcodes.INVOKEVIRTUAL);
         }
         methodCall.owner = context.targetInternal;
@@ -446,11 +446,14 @@ final class MixinTransformerEngine {
 
     private static int remappedHandleTag(Handle handle) {
         int tag = handle.getTag();
-        if ((tag == Opcodes.H_INVOKESTATIC || tag == Opcodes.H_NEWINVOKESPECIAL)
-                && (handle.getName().startsWith("lambda.") || handle.getName().startsWith("lambda$"))) {
+        if (tag == Opcodes.H_NEWINVOKESPECIAL && isLambdaMethodName(handle.getName())) {
             return Opcodes.H_INVOKEVIRTUAL;
         }
         return tag;
+    }
+
+    private static boolean isLambdaMethodName(String name) {
+        return name.startsWith("lambda.") || name.startsWith("lambda$");
     }
 
     private void applyMixinInject(MethodNode target, InjectPoint point, InjectContext context) throws NoSuchMethodException, IOException {

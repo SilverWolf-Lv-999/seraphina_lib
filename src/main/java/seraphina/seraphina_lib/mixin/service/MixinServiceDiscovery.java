@@ -31,6 +31,7 @@ final class MixinServiceDiscovery {
     private final Set<ClassLoader> scannedServiceLoaders = ConcurrentHashMap.newKeySet();
     private final ThreadLocal<Boolean> loadingServices = ThreadLocal.withInitial(() -> false);
     private volatile boolean printedServiceLoaderNotReady;
+    private volatile boolean printedServiceLoaderTypeMismatch;
     private volatile boolean serviceDiscoveryDone;
 
     MixinServiceDiscovery(SeraMixinLaunchPluginService service) {
@@ -195,6 +196,10 @@ final class MixinServiceDiscovery {
                 }
             }
         } catch (ServiceConfigurationError error) {
+            if (isProviderTypeMismatch(error)) {
+                this.printServiceLoaderTypeMismatch(error);
+                return true;
+            }
             allProvidersLoaded = false;
             if (isClassLoadingNotReady(error)) {
                 this.printServiceLoaderNotReady(error);
@@ -214,6 +219,14 @@ final class MixinServiceDiscovery {
         return allProvidersLoaded;
     }
 
+    private void printServiceLoaderTypeMismatch(ServiceConfigurationError error) {
+        if (this.printedServiceLoaderTypeMismatch) {
+            return;
+        }
+        this.printedServiceLoaderTypeMismatch = true;
+        System.err.println("[SeraMixin] Ignoring incompatible ISeraMixin ServiceLoader provider: " + error.getMessage());
+    }
+
     private void printServiceLoaderNotReady(Throwable throwable) {
         if (this.printedServiceLoaderNotReady) {
             return;
@@ -225,6 +238,17 @@ final class MixinServiceDiscovery {
     private static boolean isClassLoadingNotReady(Throwable throwable) {
         for (Throwable current = throwable; current != null; current = current.getCause()) {
             if (current instanceof NoClassDefFoundError || current instanceof ClassNotFoundException) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean isProviderTypeMismatch(Throwable throwable) {
+        for (Throwable current = throwable; current != null; current = current.getCause()) {
+            if (current instanceof ServiceConfigurationError
+                    && current.getMessage() != null
+                    && current.getMessage().contains("not a subtype")) {
                 return true;
             }
         }

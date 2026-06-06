@@ -1,6 +1,7 @@
 package seraphina.seraphina_lib.mixin.service;
 
 import net.minecraftforge.fml.loading.FMLPaths;
+import net.minecraftforge.fml.loading.FMLLoader;
 import seraphina.seraphina_lib.service.ISeraMixin;
 
 import java.io.BufferedReader;
@@ -36,6 +37,9 @@ final class MixinMappingManager {
     private MixinMappingResolver loadProviderMapping(ISeraMixin provider) {
         String resourcePath = safeMappingPath(provider);
         if (resourcePath == null || resourcePath.isBlank()) {
+            return MixinMappingResolver.EMPTY;
+        }
+        if (!isProductionEnvironment()) {
             return MixinMappingResolver.EMPTY;
         }
 
@@ -162,6 +166,14 @@ final class MixinMappingManager {
             System.err.println("[SeraMixin] ISeraMixin.getMappingType failed for "
                     + provider.getClass().getName() + ": " + throwable.getMessage());
             return "srg";
+        }
+    }
+
+    private static boolean isProductionEnvironment() {
+        try {
+            return FMLLoader.isProduction() || System.getProperties().containsKey("production");
+        } catch (Throwable ignored) {
+            return System.getProperties().containsKey("production");
         }
     }
 }
