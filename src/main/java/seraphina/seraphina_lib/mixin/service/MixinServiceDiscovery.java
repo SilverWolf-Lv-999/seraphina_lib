@@ -23,7 +23,7 @@ final class MixinServiceDiscovery {
     static final String SERVICE_INTERFACE = "seraphina.seraphina_lib.service.ISeraMixin";
     static final String SERVICE_FILE = "META-INF/services/" + SERVICE_INTERFACE;
 
-    private static final String BUILTIN_PROVIDER = "seraphina.seraphina_lib.mod.SeraLibMixin";
+    private static final String BUILTIN_PROVIDER = "seraphina.seraphina_mod.SeraLibMixin";
 
     private final SeraMixinLaunchPluginService service;
     private final Set<String> queuedServiceProviders = ConcurrentHashMap.newKeySet();

@@ -9,7 +9,7 @@ import net.minecraftforge.fml.javafmlmod.FMLJavaModLoadingContext;
 import seraphina.seraphina_lib.forge.CommandInitEvent;
 import seraphina.seraphina_lib.logger.Logger;
 import seraphina.seraphina_lib.logger.LoggerFactory;
-import seraphina.seraphina_lib.mod.common.CommandUtil;
+import seraphina.seraphina_mod.common.CommandUtil;
 import seraphina.seraphina_lib.util.ModUtil;
 import seraphina.seraphina_lib.util.ModuleUtil;
 
