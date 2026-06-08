@@ -17,4 +17,32 @@ public @interface SeraMixin {
      * @return target class
      */
     Class<?> value();
+
+    /**
+     * Physical Forge distribution where this mixin should be registered.
+     * <p>
+     * Use {@link DIST#BOTH} for common classes that should be transformed in
+     * both client and dedicated server launches.
+     *
+     * @return distribution where this mixin is active
+     */
+    DIST shouldRun() default DIST.BOTH;
+
+    /**
+     * Mixin registration distribution filter.
+     */
+    enum DIST {
+        /**
+         * Register the mixin on all Forge distributions.
+         */
+        BOTH,
+        /**
+         * Register the mixin only on the physical client.
+         */
+        CLIENT,
+        /**
+         * Register the mixin only on the dedicated server.
+         */
+        SERVER
+    }
 }

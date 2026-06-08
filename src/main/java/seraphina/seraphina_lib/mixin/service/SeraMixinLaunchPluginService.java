@@ -3,11 +3,14 @@ package seraphina.seraphina_lib.mixin.service;
 import cpw.mods.jarhandling.SecureJar;
 import cpw.mods.modlauncher.api.NamedPath;
 import cpw.mods.modlauncher.serviceapi.ILaunchPluginService;
+import net.minecraftforge.api.distmarker.Dist;
+import net.minecraftforge.fml.loading.FMLEnvironment;
 import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.Type;
 import org.objectweb.asm.tree.AnnotationNode;
 import org.objectweb.asm.tree.ClassNode;
+import seraphina.seraphina_lib.mixin.annotation.SeraMixin;
 import seraphina.seraphina_lib.service.ISeraMixin;
 import seraphina.seraphina_lib.util.HelperLib;
 
@@ -345,12 +348,17 @@ public class SeraMixinLaunchPluginService implements ILaunchPluginService {
 
     private boolean registerMixinIfAnnotatedFromASM(String mixinClassName, ClassLoader mixinClassLoader, ISeraMixin hook) {
         String normalizedMixin = normalizeClassName(mixinClassName);
-        String targetInternalName = this.readSeraMixinTargetInternalName(normalizedMixin, mixinClassLoader);
-        if (targetInternalName == null || targetInternalName.isBlank()) {
+        SeraMixinInfo mixinInfo = this.readSeraMixinInfo(normalizedMixin, mixinClassLoader);
+        if (mixinInfo == null || mixinInfo.targetInternalName == null || mixinInfo.targetInternalName.isBlank()) {
             return false;
         }
+        if (!shouldRun(mixinInfo.shouldRun)) {
+            SeraMixinLogger.info("Skipped SeraMixin {} for {} on {} dist",
+                    normalizedMixin, mixinInfo.shouldRun, FMLEnvironment.dist);
+            return true;
+        }
         int priority = hook == null ? 0 : safePriority(hook);
-        this.register(normalizedMixin, targetInternalName, mixinClassLoader, hook, priority);
+        this.register(normalizedMixin, mixinInfo.targetInternalName, mixinClassLoader, hook, priority);
         return true;
     }
 
@@ -374,10 +382,10 @@ public class SeraMixinLaunchPluginService implements ILaunchPluginService {
     }
 
     boolean hasSeraMixinAnnotation(String mixinClassName, ClassLoader mixinClassLoader) {
-        return this.readSeraMixinTargetInternalName(mixinClassName, mixinClassLoader) != null;
+        return this.readSeraMixinInfo(mixinClassName, mixinClassLoader) != null;
     }
 
-    private String readSeraMixinTargetInternalName(String mixinClassName, ClassLoader mixinClassLoader) {
+    private SeraMixinInfo readSeraMixinInfo(String mixinClassName, ClassLoader mixinClassLoader) {
         String normalizedMixin = normalizeClassName(mixinClassName);
         byte[] mixinBytes;
         try {
@@ -402,7 +410,11 @@ public class SeraMixinLaunchPluginService implements ILaunchPluginService {
         if (annotation == null) {
             return null;
         }
-        return MixinAnnotationUtils.annotationClassInternalName(MixinAnnotationUtils.annotationValue(annotation, "value"));
+        String targetInternalName = MixinAnnotationUtils.annotationClassInternalName(
+                MixinAnnotationUtils.annotationValue(annotation, "value"));
+        SeraMixin.DIST shouldRun = MixinAnnotationUtils.annotationEnumValue(
+                annotation, "shouldRun", SeraMixin.DIST.class, SeraMixin.DIST.BOTH);
+        return new SeraMixinInfo(targetInternalName, shouldRun);
     }
 
     private void register(String mixinClassName, String targetClassName, ClassLoader mixinClassLoader, ISeraMixin hook, int priority) {
@@ -431,6 +443,18 @@ public class SeraMixinLaunchPluginService implements ILaunchPluginService {
         }
     }
 
+    private static boolean shouldRun(SeraMixin.DIST shouldRun) {
+        if (shouldRun == null || shouldRun == SeraMixin.DIST.BOTH) {
+            return true;
+        }
+        Dist currentDist = FMLEnvironment.dist;
+        return switch (shouldRun) {
+            case CLIENT -> currentDist == Dist.CLIENT;
+            case SERVER -> currentDist == Dist.DEDICATED_SERVER;
+            case BOTH -> true;
+        };
+    }
+
     private boolean hasRegisteredMixins() {
         for (List<ClassInfo> infos : this.registeredMixins.values()) {
             if (infos != null && !infos.isEmpty()) {
@@ -438,5 +462,15 @@ public class SeraMixinLaunchPluginService implements ILaunchPluginService {
             }
         }
         return false;
+    }
+
+    private static final class SeraMixinInfo {
+        final String targetInternalName;
+        final SeraMixin.DIST shouldRun;
+
+        SeraMixinInfo(String targetInternalName, SeraMixin.DIST shouldRun) {
+            this.targetInternalName = targetInternalName;
+            this.shouldRun = shouldRun == null ? SeraMixin.DIST.BOTH : shouldRun;
+        }
     }
 }

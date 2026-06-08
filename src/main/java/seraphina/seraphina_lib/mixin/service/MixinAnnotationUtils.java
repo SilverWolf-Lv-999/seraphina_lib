@@ -101,21 +101,19 @@ final class MixinAnnotationUtils {
     }
 
     static InsertPosition annotationEnumValue(AnnotationNode annotation, String key, InsertPosition defaultValue) {
-        Object value = annotationValue(annotation, key);
-        if (value instanceof String[] enumValue && enumValue.length > 1) {
-            try {
-                return InsertPosition.valueOf(enumValue[1]);
-            } catch (IllegalArgumentException ignored) {
-            }
-        }
-        return defaultValue;
+        return annotationEnumValue(annotation, key, InsertPosition.class, defaultValue);
     }
 
     static InsertShift annotationEnumValue(AnnotationNode annotation, String key, InsertShift defaultValue) {
+        return annotationEnumValue(annotation, key, InsertShift.class, defaultValue);
+    }
+
+    static <E extends Enum<E>> E annotationEnumValue(AnnotationNode annotation, String key,
+                                                    Class<E> enumType, E defaultValue) {
         Object value = annotationValue(annotation, key);
         if (value instanceof String[] enumValue && enumValue.length > 1) {
             try {
-                return InsertShift.valueOf(enumValue[1]);
+                return Enum.valueOf(enumType, enumValue[1]);
             } catch (IllegalArgumentException ignored) {
             }
         }
