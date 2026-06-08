@@ -3,7 +3,9 @@ package seraphina.seraphina_lib;
 import com.mojang.brigadier.CommandDispatcher;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraftforge.common.MinecraftForge;
+import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.fml.ModList;
+import net.minecraftforge.fml.loading.FMLEnvironment;
 import net.minecraftforge.fml.common.Mod;
 import net.minecraftforge.fml.javafmlmod.FMLJavaModLoadingContext;
 import seraphina.seraphina_lib.forge.CommandInitEvent;
@@ -27,6 +29,9 @@ public class LIBSource {
 
     public LIBSource(FMLJavaModLoadingContext context) {
         MinecraftForge.EVENT_BUS.addListener(this::command);
+        if (FMLEnvironment.dist == Dist.CLIENT) {
+            ClientOnly.register(context);
+        }
         LOGGER.info("Seraphina Lib Initialized");
         if (ModUtil.isDevelopment()) {
             LOGGER.info("Development mode enabled");
@@ -45,5 +50,11 @@ public class LIBSource {
     static {
         ModuleUtil.INSTANCE.openAllRequiredModules(LIBSource.class);
         ModuleUtil.INSTANCE.openCurrentModuleToAllRequiredModules(LIBSource.class);
+    }
+
+    private static final class ClientOnly {
+        private static void register(FMLJavaModLoadingContext context) {
+            context.getModEventBus().addListener(seraphina.seraphina_mod.client.particle.ParticleUtil::registerShaders);
+        }
     }
 }
