@@ -9,6 +9,7 @@ import org.objectweb.asm.Type;
 import org.objectweb.asm.tree.AnnotationNode;
 import org.objectweb.asm.tree.ClassNode;
 import seraphina.seraphina_lib.service.ISeraMixin;
+import seraphina.seraphina_lib.util.HelperLib;
 
 import java.io.IOException;
 import java.nio.file.Path;
@@ -68,6 +69,7 @@ public class SeraMixinLaunchPluginService implements ILaunchPluginService {
 
     @Override
     public EnumSet<Phase> handlesClass(Type classType, boolean isEmpty, String reason) {
+        HelperLib.linkServiceLayerFallbackToGameClassLoader();
         if (isEmpty || classType == null || "computing_frames".equals(reason) || this.name().equals(reason)) {
             return EnumSet.noneOf(Phase.class);
         }

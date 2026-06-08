@@ -1,6 +1,9 @@
 package seraphina.seraphina_lib.util;
 
+import cpw.mods.cl.ModuleClassLoader;
+import cpw.mods.modlauncher.Launcher;
 import cpw.mods.modlauncher.api.NamedPath;
+import cpw.mods.modlauncher.api.IModuleLayerManager;
 import net.minecraftforge.fml.loading.ModDirTransformerDiscoverer;
 import org.apache.commons.compress.utils.IOUtils;
 import seraphina.seraphina_lib.logger.Logger;
@@ -36,6 +39,7 @@ import java.util.jar.JarFile;
  */
 public final class HelperLib {
     static final Logger LOGGER = LoggerFactory.getLogger(HelperLib.class);
+    private static volatile boolean serviceLayerFallbackLinked;
 
     /**
      * Returns the filesystem path of the jar or classpath location that contains
@@ -285,8 +289,8 @@ public final class HelperLib {
     }
 
     /**
-     * Removes the library jar from selected Forge loader structures when the same
-     * code is present as both a core component and a mod.
+     * Keeps the transformation-service jar excluded from Forge's normal mods-folder
+     * scan so the same physical jar is not added to two module layers.
      */
     @SuppressWarnings({"ConstantConditions", "unchecked", "rawtypes"})
     public static void coexistenceCoreAndMod() {
@@ -309,7 +313,71 @@ public final class HelperLib {
         if (!alreadyExcluded) {
             found.add(new NamedPath("cpw.mods.modlauncher.api.ITransformationService", currentJarPath));
             LOGGER.info("Excluded transformation-service jar from normal mod scan: {}", currentJarPath);
+        } else {
+            LOGGER.debug("Current transformation-service jar is already excluded from normal mod scan: {}", currentJarPath);
         }
+    }
+
+    @SuppressWarnings("rawtypes")
+    public static void linkServiceLayerFallbackToGameClassLoader() {
+        if (serviceLayerFallbackLinked) {
+            return;
+        }
+        try {
+            Object moduleLayerHandler = HelperLib.getFieldValue(Launcher.INSTANCE, "moduleLayerHandler", Object.class);
+            EnumMap completedLayers = HelperLib.getFieldValue(moduleLayerHandler, "completedLayers", EnumMap.class);
+            if (completedLayers == null) {
+                return;
+            }
+
+            Object serviceLayerInfo = completedLayers.get(IModuleLayerManager.Layer.SERVICE);
+            Object gameLayerInfo = completedLayers.get(IModuleLayerManager.Layer.GAME);
+            ModuleClassLoader serviceClassLoader = layerInfoClassLoader(serviceLayerInfo);
+            ModuleClassLoader gameClassLoader = layerInfoClassLoader(gameLayerInfo);
+            ModuleLayer gameLayer = layerInfoModuleLayer(gameLayerInfo);
+            if (serviceClassLoader == null || gameClassLoader == null || serviceClassLoader == gameClassLoader) {
+                return;
+            }
+
+            serviceClassLoader.setFallbackClassLoader(gameClassLoader);
+            ModuleUtil.INSTANCE.addReadsToLayerModules(HelperLib.class, gameLayer);
+            serviceLayerFallbackLinked = true;
+            LOGGER.info("Linked service layer fallback classloader to game classloader");
+        } catch (Throwable throwable) {
+            LOGGER.warn("Cannot link service layer fallback classloader: {}", throwable.getMessage());
+        }
+    }
+
+    private static ModuleClassLoader layerInfoClassLoader(Object layerInfo) {
+        if (layerInfo == null) {
+            return null;
+        }
+        try {
+            Method method = layerInfo.getClass().getDeclaredMethod("cl");
+            method.trySetAccessible();
+            Object classLoader = method.invoke(layerInfo);
+            if (classLoader instanceof ModuleClassLoader moduleClassLoader) {
+                return moduleClassLoader;
+            }
+        } catch (Throwable ignored) {
+        }
+        return HelperLib.getFieldValue(layerInfo, "cl", ModuleClassLoader.class);
+    }
+
+    private static ModuleLayer layerInfoModuleLayer(Object layerInfo) {
+        if (layerInfo == null) {
+            return null;
+        }
+        try {
+            Method method = layerInfo.getClass().getDeclaredMethod("layer");
+            method.trySetAccessible();
+            Object layer = method.invoke(layerInfo);
+            if (layer instanceof ModuleLayer moduleLayer) {
+                return moduleLayer;
+            }
+        } catch (Throwable ignored) {
+        }
+        return HelperLib.getFieldValue(layerInfo, "layer", ModuleLayer.class);
     }
 
     private static Path normalizePath(Path path) {

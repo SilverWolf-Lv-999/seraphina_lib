@@ -396,6 +396,7 @@ src/main/java/seraphina/seraphina_lib/
 - 该项目使用 JDK internal API、`Unsafe`、ModLauncher 内部结构和 ASM，Forge、Java 或 ModLauncher 升级后需要重点回归启动阶段。
 - `@Inject`、`@Overwrite`、`@Redirect` 都依赖准确的方法名和 JVM 描述符，目标方法签名变化会导致注入失效。
 - 多个模组同时修改同一目标方法时，建议通过 `ISeraMixin#getPriority()` 和更小范围的注入点降低冲突。
+- 使用 SeraMixin 时，SeraphinaLib 必须作为顶层 mod jar 放入 `mods/`；消费模组不要再 JarJar 嵌入同一份库，否则会产生重复模块/重复包。
 - 客户端图片工具依赖 Minecraft client 类，只应在客户端渲染代码中使用。
 
 ## 许可证

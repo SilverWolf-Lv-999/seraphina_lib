@@ -103,6 +103,28 @@ public class ModuleUtil {
         }
     }
 
+    public void addReadsToLayerModules(Class<?> clazz, ModuleLayer targetLayer) {
+        if (targetLayer == null) {
+            return;
+        }
+        Module currentModule = clazz.getModule();
+        targetLayer.modules().stream()
+                .sorted(Comparator.comparing(Module::getName))
+                .forEach(module -> addReadToModule(currentModule, module));
+    }
+
+    private void addReadToModule(Module module, Module readModule) {
+        if (module == null || readModule == null || module == readModule || module.canRead(readModule)) {
+            return;
+        }
+        try {
+            addRead(module, readModule);
+            LOGGER.info("Adding module read edge '{}' -> '{}'", moduleName(module), moduleName(readModule));
+        } catch (Throwable throwable) {
+            LOGGER.warn("Failed to add module read edge '{}' -> '{}'", moduleName(module), moduleName(readModule));
+        }
+    }
+
     private Set<Module> collectCurrentModuleReaderModules(Module currentModule, ModuleLayer bootLayer) {
         Set<Module> targetModules = new LinkedHashSet<>();
         Set<String> openedModules = new LinkedHashSet<>();
