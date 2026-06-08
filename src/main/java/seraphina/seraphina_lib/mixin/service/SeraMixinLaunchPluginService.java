@@ -43,7 +43,6 @@ public class SeraMixinLaunchPluginService implements ILaunchPluginService {
     private final MixinTransformerEngine transformerEngine;
     private final MixinServiceDiscovery serviceDiscovery;
     private final MixinMappingManager mappingManager;
-    private volatile boolean launchInitialized;
 
     public SeraMixinLaunchPluginService() {
         this.classProvider = new MixinClassProvider(this.getClass());
@@ -141,7 +140,6 @@ public class SeraMixinLaunchPluginService implements ILaunchPluginService {
     @Override
     public void initializeLaunch(ITransformerLoader transformerLoader, NamedPath[] specialPaths) {
         this.classProvider.setTransformerLoader(transformerLoader);
-        this.launchInitialized = true;
     }
 
     @Override
@@ -244,10 +242,6 @@ public class SeraMixinLaunchPluginService implements ILaunchPluginService {
                 pending.apply(this);
             }
         }
-    }
-
-    boolean isLaunchInitialized() {
-        return this.launchInitialized;
     }
 
     ClassLoader getRuntimeClassLoader() {

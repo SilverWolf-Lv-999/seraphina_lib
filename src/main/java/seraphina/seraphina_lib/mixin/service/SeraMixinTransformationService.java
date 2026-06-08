@@ -5,14 +5,11 @@ import cpw.mods.modlauncher.Launcher;
 import cpw.mods.modlauncher.api.IEnvironment;
 import cpw.mods.modlauncher.api.ITransformationService;
 import cpw.mods.modlauncher.api.ITransformer;
-import cpw.mods.modlauncher.api.NamedPath;
 import cpw.mods.modlauncher.serviceapi.ILaunchPluginService;
 import org.jetbrains.annotations.NotNull;
 import seraphina.seraphina_lib.util.HelperLib;
 
 import java.lang.reflect.Constructor;
-import java.lang.reflect.InvocationTargetException;
-import java.lang.reflect.Method;
 import java.util.AbstractCollection;
 import java.util.AbstractMap;
 import java.util.AbstractSet;
@@ -38,17 +35,10 @@ public class SeraMixinTransformationService implements ITransformationService {
     private static volatile boolean lockThreadStarted;
     private static volatile boolean launchPluginGuardFailureLogged;
     private static volatile boolean transformationServiceGuardFailureLogged;
-    private static volatile boolean lateLaunchInitializationFailureLogged;
 
     public SeraMixinTransformationService() {
-        this(true);
-    }
-
-    private SeraMixinTransformationService(boolean installLocks) {
         currentService = this;
-        if (installLocks) {
-            installServiceLocks();
-        }
+        installServiceLocks();
     }
 
     @Override
@@ -74,19 +64,10 @@ public class SeraMixinTransformationService implements ITransformationService {
         return List.of();
     }
 
-    public static void installServiceLocks() {
+    static void installServiceLocks() {
         installLaunchPluginLock();
         installTransformationServiceLock();
         startLockThread();
-    }
-
-    public static void bootstrapFromModEntry() {
-        ensureCurrentService();
-        installServiceLocks();
-    }
-
-    public static void bootstrapFromCoremod() {
-        bootstrapFromModEntry();
     }
 
     @SuppressWarnings("unchecked")
@@ -109,11 +90,6 @@ public class SeraMixinTransformationService implements ITransformationService {
                     SeraMixinTransformationService::isSeraMixinLaunchPlugin);
             if (plugins != locked) {
                 HelperLib.setFieldValue(handler, "plugins", locked);
-            }
-            try {
-                initializeInjectedLaunchPlugin();
-            } catch (Throwable throwable) {
-                logLateLaunchInitializationFailure(throwable);
             }
         } catch (Throwable throwable) {
             logLaunchPluginGuardFailure(throwable);
@@ -192,67 +168,6 @@ public class SeraMixinTransformationService implements ITransformationService {
         }
     }
 
-    private static SeraMixinTransformationService ensureCurrentService() {
-        SeraMixinTransformationService service = currentService;
-        if (service != null) {
-            return service;
-        }
-        synchronized (SeraMixinTransformationService.class) {
-            service = currentService;
-            if (service == null) {
-                service = new SeraMixinTransformationService(false);
-            }
-            return service;
-        }
-    }
-
-    private static void initializeInjectedLaunchPlugin() {
-        if (LAUNCH_PLUGIN.isLaunchInitialized()) {
-            return;
-        }
-        Launcher launcher = Launcher.INSTANCE;
-        if (launcher == null) {
-            return;
-        }
-        Object classLoader = HelperLib.getFieldValue(launcher, "classLoader", Object.class);
-        if (classLoader == null) {
-            return;
-        }
-        synchronized (SeraMixinTransformationService.class) {
-            if (LAUNCH_PLUGIN.isLaunchInitialized()) {
-                return;
-            }
-            LAUNCH_PLUGIN.initializeLaunch(
-                    className -> buildTransformedClassBytes(classLoader, className),
-                    new NamedPath[0]);
-            SeraMixinLogger.info("Late-initialized SeraMixin launch plugin after service discovery");
-        }
-    }
-
-    private static byte[] buildTransformedClassBytes(Object classLoader, String className) throws ClassNotFoundException {
-        try {
-            Method method = classLoader.getClass()
-                    .getDeclaredMethod("buildTransformedClassNodeFor", String.class, String.class);
-            method.trySetAccessible();
-            Object result = method.invoke(classLoader, className, LAUNCH_PLUGIN_NAME);
-            return result instanceof byte[] bytes ? bytes : null;
-        } catch (InvocationTargetException exception) {
-            Throwable cause = exception.getCause();
-            if (cause instanceof ClassNotFoundException classNotFoundException) {
-                throw classNotFoundException;
-            }
-            if (cause instanceof RuntimeException runtimeException) {
-                throw runtimeException;
-            }
-            if (cause instanceof Error error) {
-                throw error;
-            }
-            throw new ClassNotFoundException(className, cause);
-        } catch (ReflectiveOperationException | LinkageError exception) {
-            throw new ClassNotFoundException(className, exception);
-        }
-    }
-
     private static void startLockThread() {
         if (lockThreadStarted) {
             return;
@@ -297,15 +212,6 @@ public class SeraMixinTransformationService implements ITransformationService {
         }
         transformationServiceGuardFailureLogged = true;
         SeraMixinLogger.warn("Failed to lock SeraMixin transformation service map: {}", throwable.getMessage());
-        SeraMixinLogger.exception(throwable);
-    }
-
-    private static void logLateLaunchInitializationFailure(Throwable throwable) {
-        if (lateLaunchInitializationFailureLogged) {
-            return;
-        }
-        lateLaunchInitializationFailureLogged = true;
-        SeraMixinLogger.warn("Failed to late-initialize SeraMixin launch plugin: {}", throwable.getMessage());
         SeraMixinLogger.exception(throwable);
     }
 
